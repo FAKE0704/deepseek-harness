@@ -150,6 +150,47 @@ describe('createSnapshotStore', () => {
     expect(revived.getSnapshot().a.n).toBe(42)
   })
 
+  it('rehydrates object snapshots as a shallow merge: fields an older snapshot lacks revive with init defaults', () => {
+    const backing = new Map<string, string>([
+      // A snapshot written before `b` existed: merging over init revives it.
+      ['spec-legacy', JSON.stringify({ a: { n: 5 } })],
+    ])
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => backing.get(k) ?? null,
+      setItem: (k: string, v: string) => { backing.set(k, v) },
+      removeItem: (k: string) => { backing.delete(k) },
+    })
+    const store = createSnapshotStore(init(), { persist: { name: 'spec-legacy' } })
+    expect(store.getSnapshot()).toEqual({ a: { n: 5 }, b: { list: ['x'] } })
+    expect(() => { store.update((d) => { d.b.list.push('y') }) }).not.toThrow()
+  })
+
+  it('keeps the whole-value replacement contract for array snapshots', () => {
+    const backing = new Map<string, string>([['spec-array', JSON.stringify(['a'])]])
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => backing.get(k) ?? null,
+      setItem: (k: string, v: string) => { backing.set(k, v) },
+      removeItem: (k: string) => { backing.delete(k) },
+    })
+    const store = createSnapshotStore(['x'], { persist: { name: 'spec-array' } })
+    expect(store.getSnapshot()).toEqual(['a'])
+  })
+
+  it('discards a non-object snapshot for an object state and keeps init', () => {
+    const backing = new Map<string, string>([['spec-alien', JSON.stringify('alien')]])
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => backing.get(k) ?? null,
+      setItem: (k: string, v: string) => { backing.set(k, v) },
+      removeItem: (k: string) => { backing.delete(k) },
+    })
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const store = createSnapshotStore(init(), { persist: { name: 'spec-alien' } })
+    expect(store.getSnapshot()).toEqual(init())
+    expect(report).toHaveBeenCalledWith(
+      "snapshot store 'spec-alien' rehydration discarded a non-object snapshot",
+    )
+  })
+
   it('reports rehydration failures without preventing store creation', () => {
     const failure = new Error('storage read failed')
     vi.stubGlobal('localStorage', {
@@ -254,6 +295,43 @@ describe('defineStore', () => {
     expect(backing.has('spec.chat.s1')).toBe(false)
     expect(backing.has('spec.chat.s2')).toBe(true)
     expect(backing.has('spec.chat')).toBe(true)
+  })
+
+  it('revives a persisted object store with defaults for fields a legacy snapshot lacks', () => {
+    const backing = new Map<string, string>([
+      // What a pre-sessionOrderByAccount view snapshot looked like: the
+      // current actions dereference the missing field on first retention.
+      ['spec.view.v5', JSON.stringify({ groupBy: 'workspace', orderBy: 'manual', groupExpansion: { w: true } })],
+    ])
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => backing.get(k) ?? null,
+      setItem: (k: string, v: string) => { backing.set(k, v) },
+      removeItem: (k: string) => { backing.delete(k) },
+    })
+    const handle = defineStore({
+      init: () => ({
+        groupBy: 'workspace' as const,
+        orderBy: 'updated' as const,
+        groupExpansion: {} as Record<string, boolean>,
+        sessionOrderByAccount: {} as Record<string, string[]>,
+      }),
+      persist: 'spec.view.v5',
+      actions: {
+        retain: (d, keys: readonly string[]) => {
+          const retained = new Set(keys)
+          d.groupExpansion = Object.fromEntries(Object.entries(d.groupExpansion).filter(([k]) => retained.has(k)))
+          d.sessionOrderByAccount = Object.fromEntries(
+            Object.entries(d.sessionOrderByAccount).filter(([k]) => retained.has(k)),
+          )
+        },
+      },
+    })
+    const inst = handle.create()
+    // Before the rehydration merge this threw: sessionOrderByAccount was undefined.
+    expect(() => { inst.actions.retain(['w']) }).not.toThrow()
+    expect(inst.store.getSnapshot()).toEqual({
+      groupBy: 'workspace', orderBy: 'manual', groupExpansion: { w: true }, sessionOrderByAccount: {},
+    })
   })
 
   it('clearPersisted is a no-op without a persist declaration or without storage', () => {

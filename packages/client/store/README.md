@@ -31,7 +31,7 @@ None; the stores neither assemble nor send model requests.
 
 <a id="known-limitations-and-deferred-work"></a>
 
-- **Persistence is browser-local** — persisted stores use JSON in `localStorage`; non-browser runtimes disable persistence, and the package provides no cross-device synchronization.
+- **Persistence is browser-local** — persisted stores use JSON in `localStorage`; non-browser runtimes disable persistence, and the package provides no cross-device synchronization. Object snapshots rehydrate as a shallow merge over the initial state, so a field missing from an older snapshot revives with its declared default; non-object states replace whole, and a non-object snapshot for an object state is discarded.
 - **Web-shell build input** — the static ESM retains third-party imports for Vite; independent consumers supply its development dependencies ([dependency rules](../AGENTS.md#dependency-declaration)).
 
 

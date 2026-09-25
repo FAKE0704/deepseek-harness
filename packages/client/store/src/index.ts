@@ -142,7 +142,36 @@ export function createSnapshotStore<T>(
  * draft becomes {0:'h',1:'e',...}) — not fixable via merge/deserialize options
  * because the corruption happens before serialization. Storage failures
  * (quota, private mode) only disable persistence, never break the store.
+ *
+ * Rehydration merges object snapshots over the state they replace: a field
+ * absent from an older snapshot (written by a previous schema or a third-party
+ * rewrite of the same key) revives with its init default instead of undefined,
+ * so no consumer observes a state shape init() never produced. Non-object
+ * states keep the whole-value replacement contract; a non-object snapshot for
+ * an object state is discarded with a console diagnostic.
  */
+
+/** Structural object check for the rehydration merge; arrays replace whole. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Revive a parsed snapshot against the state it replaces.
+ * @param parsed - value decoded from the persisted JSON.
+ * @param current - live state the snapshot would replace.
+ * @param name - persistence key, for the discard diagnostic.
+ * @returns the rehydrated state (merged, whole-replaced, or the surviving current state).
+ */
+function reviveSnapshot<T>(parsed: unknown, current: T, name: string): T {
+  if (!isPlainObject(current)) return parsed as T
+  if (!isPlainObject(parsed)) {
+    console.error(`snapshot store '${name}' rehydration discarded a non-object snapshot`)
+    return current
+  }
+  return { ...current, ...parsed }
+}
+
 function attachPersistence<T>(api: StoreApi<T>, name: string): void {
   // Non-browser runs (node e2e booting the client tree) have no localStorage:
   // persistence silently disables — same contract as a storage failure, minus
@@ -151,7 +180,7 @@ function attachPersistence<T>(api: StoreApi<T>, name: string): void {
   try {
     const raw = localStorage.getItem(name)
     if (raw !== null) {
-      api.setState(devFreeze(JSON.parse(raw) as T), true)
+      api.setState(devFreeze(reviveSnapshot(JSON.parse(raw), api.getState(), name)), true)
     }
   } catch (error) {
     console.error(`snapshot store '${name}' rehydration failed:`, error)

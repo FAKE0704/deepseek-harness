@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type {
@@ -847,6 +847,26 @@ describe('createWorkspaceViewStore', () => {
     const snapshot = store.getSnapshot()
     expect(snapshot.groupExpansion).toEqual({ '': true, alpha: true })
     expect(snapshot.sessionOrderByAccount).toEqual({ alpha: ['alpha-session'] })
+  })
+
+  it('rehydrates a legacy snapshot missing account fields without crashing retention', () => {
+    // A v5 entry written before sessionOrderByAccount existed (or rewritten
+    // by a third-party patch): retention must not crash on the missing field.
+    const legacy = JSON.stringify({ groupBy: 'flat', orderBy: 'manual', groupExpansion: { alpha: true } })
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => (k === 'dsh.workspace.view.v5' ? legacy : null),
+      setItem: () => {},
+      removeItem: () => {},
+    })
+    const store = createWorkspaceViewStore().create()
+    expect(() => { store.actions.retainAccountKeys(['alpha']) }).not.toThrow()
+    expect(store.getSnapshot()).toMatchObject({
+      groupBy: 'flat',
+      orderBy: 'manual',
+      groupExpansion: { alpha: true },
+      sessionOrderByAccount: {},
+    })
+    vi.unstubAllGlobals()
   })
 })
 
