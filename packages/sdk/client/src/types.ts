@@ -24,6 +24,13 @@ export type NotificationFilter = (notification: HarnessNotification) => boolean
 export interface HarnessClientOptions {
   /** Absolute or caller-relative dsh CLI module; omitted resolves this package's same-version dependency. */
   dshBin?: string
+  /**
+   * Node executable used to run the dsh child process (default `process.execPath`).
+   * Hosts on a non-Node runtime (e.g. Bun) must point this at a real Node binary:
+   * dsh boot requires V8 internals (`node-addon-require-builtin`) that Bun does not provide.
+   * Relative values resolve against the caller's working directory before spawn.
+   */
+  nodeExecutable?: string
   /** Named profile serving the SDK protocol (default `sdk`). */
   profile?: string
   /** Ordered per-launch profile patches; relative paths resolve before spawn. */

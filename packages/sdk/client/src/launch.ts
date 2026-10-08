@@ -138,8 +138,9 @@ export function resolveDshLaunch(
     ...(options.patches ?? []).map(path => resolve(callerCwd, path)),
   ]
   const dshHome = options.dshHome === undefined ? undefined : resolve(callerCwd, options.dshHome)
+  const nodeExecutable = options.nodeExecutable === undefined ? process.execPath : resolve(callerCwd, options.nodeExecutable)
   return {
-    command: process.execPath,
+    command: nodeExecutable,
     args: [...dshLaunch.nodeArgs, '--profile', profile, ...patches.flatMap(path => ['--patch', path])],
     ...options.processCwd === undefined ? {} : { cwd: resolve(callerCwd, options.processCwd) },
     environment: () => ({
