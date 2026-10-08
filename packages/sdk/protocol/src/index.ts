@@ -18,6 +18,7 @@ export type {
   SdkEncodedImageBlock,
   SdkPromptContentBlock,
   SdkRunStatus,
+  SessionApprovalRespondParams,
   SessionEventNotification,
   SessionStatusNotification,
   SessionPromptParams,

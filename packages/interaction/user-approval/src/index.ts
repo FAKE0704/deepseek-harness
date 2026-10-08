@@ -228,9 +228,49 @@ export class ApprovalService extends Service {
       ...req.callId !== undefined ? { callId: req.callId } : {},
       ...req.reason !== undefined ? { reason: req.reason } : {},
     })
-    const outcome = await this.decide(req, session)
+    const outcome = await this.decide(req, session, id)
+    this.parked.delete(id)
     session.append('approval/decided', { id, outcome })
     return outcome
+  }
+
+  /** Parked external asks: approval/asked emitted, awaiting respondExternal(). */
+  private readonly parked = new Map<ApprovalRequestId, (outcome: ApprovalOutcome) => void>()
+  private externalEnabled = false
+
+  /**
+   * Attach the out-of-process responder (SDK server construction). After this
+   * call, an ask no in-process waterfall answerer resolves parks instead of
+   * failing closed — the attached responder owns the decision. Unattached
+   * keeps the documented deterministic CI/unattended stance ('unavailable').
+   */
+  enableExternalResponder(): void {
+    this.externalEnabled = true
+  }
+
+  /**
+   * Deliver one external decision for a parked ask (SDK `session/approval-respond`).
+   * @returns false when the id is unknown or already decided (race/timeout).
+   */
+  respondExternal(id: ApprovalRequestId, outcome: ApprovalOutcome): boolean {
+    const settle = this.parked.get(id)
+    if (settle === undefined) return false
+    this.parked.delete(id)
+    settle(outcome)
+    return true
+  }
+
+  /**
+   * Waterfall fallback: with an external responder attached the ask parks
+   * until respondExternal() delivers the decision; unattached stays the
+   * documented fail-closed stance. The decide()-level abort race resolves
+   * 'cancelled' independently; request() drops the stale park on settle.
+   */
+  private parkExternal(id: ApprovalRequestId): Promise<ApprovalOutcome> {
+    if (!this.externalEnabled) return Promise.resolve<ApprovalOutcome>('unavailable')
+    return new Promise<ApprovalOutcome>((resolve) => {
+      this.parked.set(id, resolve)
+    })
   }
 
   /**
@@ -262,9 +302,10 @@ export class ApprovalService extends Service {
    * Dispatch the waterfall, contained and raced against the request signal.
    * @param req - the borrowed public request.
    * @param session - the request agent's session used for policy lookup.
+   * @param id - the audit id of this ask (external-responder parking key).
    * @returns the normalized closed outcome.
    */
-  private async decide(req: ApprovalRequest, session: Session): Promise<ApprovalOutcome> {
+  private async decide(req: ApprovalRequest, session: Session, id: ApprovalRequestId): Promise<ApprovalOutcome> {
     const signal = req.signal
     if (signal?.aborted) return 'cancelled'
     // The 'never' policy is decided HERE, before any dispatch: a listener
@@ -280,7 +321,7 @@ export class ApprovalService extends Service {
     const answer: Promise<ApprovalOutcome> = Promise.resolve().then(
       () => this.ctx.waterfall(
         scopeTarget(req.agent, req.agent), 'approval/request', req,
-        () => Promise.resolve<ApprovalOutcome>('unavailable'),
+        () => this.parkExternal(id),
       ),
     ).then(
       // Normalize a rogue (non-vocabulary) answerer return to the fail-closed

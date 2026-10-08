@@ -7,7 +7,7 @@ import type { Scope } from '@deepseek-ai/dsh-scope'
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ApprovalService, { ApprovalOutcome, ApprovalRequest, setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
+import ApprovalService, { ApprovalOutcome, ApprovalRequestId, ApprovalRequest, setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 
 /**
  * A minimal Agent stand-in — the service only reaches `agent.session.append`
@@ -516,5 +516,50 @@ describe('approval policy (the approval/policy fold)', () => {
     expect(await contextFor()).toBeDefined()
     await fiber.dispose()
     expect(await contextFor()).toBeUndefined()
+  })
+})
+
+describe('external responder (SDK approval-respond)', () => {
+  it('parks an unanswered ask when attached and settles by respondExternal', async () => {
+    const ctx = await mounted()
+    ctx.approval.enableExternalResponder()
+    const { agent, appended } = fakeAgent()
+
+    const asking = ctx.approval.request(requestOf(agent, { callId: ToolCallId('call-ext'), reason: 'outside roots' }))
+    await vi.waitFor(() => {
+      if (appended.length < 1) throw new Error('asked not yet appended')
+      const id = ApprovalRequestId(String(appended[0]!.data.id))
+      // Retry until the waterfall reaches the park; true = the decision was taken.
+      if (!ctx.approval.respondExternal(id, 'allowed-once')) throw new Error('not parked yet')
+    })
+
+    await expect(asking).resolves.toBe('allowed-once')
+    expect(appended.map(e => e.type)).toEqual(['approval/asked', 'approval/decided'])
+    expect(appended[1]!.data.outcome).toBe('allowed-once')
+  })
+
+  it('a settled ask rejects a second respondExternal (race/timeout guard)', async () => {
+    const ctx = await mounted()
+    ctx.approval.enableExternalResponder()
+    const { agent, appended } = fakeAgent()
+
+    const asking = ctx.approval.request(requestOf(agent))
+    await vi.waitFor(() => {
+      if (appended.length < 1) throw new Error('asked not yet appended')
+      if (!ctx.approval.respondExternal(ApprovalRequestId(String(appended[0]!.data.id)), 'rejected')) {
+        throw new Error('not parked yet')
+      }
+    })
+    await expect(asking).resolves.toBe('rejected')
+    expect(ctx.approval.respondExternal(ApprovalRequestId(String(appended[0]!.data.id)), 'allowed-once')).toBe(false)
+  })
+
+  it('unattached keeps the fail-closed stance; unknown ids return false', async () => {
+    const ctx = await mounted()
+    const { agent, appended } = fakeAgent()
+
+    expect(ctx.approval.respondExternal(ApprovalRequestId('never-issued'), 'rejected')).toBe(false)
+    await expect(ctx.approval.request(requestOf(agent))).resolves.toBe('unavailable')
+    expect(appended[1]!.data.outcome).toBe('unavailable')
   })
 })

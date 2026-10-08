@@ -58,6 +58,14 @@ export interface SessionPromptResult {
   messageId: string
 }
 
+/** `session/approval-respond` params: resolve one parked external approval ask. */
+export interface SessionApprovalRespondParams {
+  /** The `approval/asked` audit id being decided (as delivered in the session event). */
+  id: string
+  /** The decision vocabulary; `allowed-once` is the only grant. */
+  outcome: 'allowed-once' | 'rejected' | 'cancelled'
+}
+
 /** Deployment-mapped SDK outcome: `ok` for an accepted result, `error` otherwise. */
 export type SdkRunStatus = 'ok' | 'error'
 
@@ -115,5 +123,6 @@ export interface HarnessSdkNotificationMap {
 export interface HarnessSdkRequestMap {
   'initialize': { params: InitializeParams; result: InitializeResult }
   'session/prompt': { params: SessionPromptParams; result: SessionPromptResult }
+  'session/approval-respond': { params: SessionApprovalRespondParams; result: Record<string, never> }
   'shutdown': { params: undefined; result: Record<string, never> }
 }

@@ -298,6 +298,20 @@ export class HarnessClient {
   }
 
   /**
+   * Resolve one parked external approval ask (`session/approval-respond`).
+   * Valid while a run of the asking session is parked on the ask; the id is
+   * the `approval/asked` audit id observed through `session.event`.
+   * @param id - the asked id being decided.
+   * @param outcome - the decision; `allowed-once` is the only grant.
+   */
+  async approvalRespond(id: string, outcome: 'allowed-once' | 'rejected' | 'cancelled'): Promise<void> {
+    const result = await this.request('session/approval-respond', { id, outcome })
+    if (!isRecord(result) && result !== undefined) {
+      throw new SdkProtocolError(`session/approval-respond returned malformed result: ${JSON.stringify(result)}`)
+    }
+  }
+
+  /**
    * Send one JSON-RPC request and await its result.
    * @param method - the wire method name.
    * @param params - the params object; omitted params send `{}`.

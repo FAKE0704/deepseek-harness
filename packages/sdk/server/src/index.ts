@@ -57,6 +57,14 @@ export function apply(ctx: Context, config: JsonRpcConfig): void {
   const exit = config.exit ?? ((code: number): void => { process.exit(code) })
 
   const transport = new JsonRpcLineTransport(input, output)
+  // Attach the external approval responder as soon as the service mounts
+  // (order-independent): with an SDK peer serving this runtime, unanswered
+  // approval asks park for `session/approval-respond` instead of failing
+  // closed at once. Class tests construct the server against a partial
+  // context, so the attach lives here at the production assembly point.
+  ctx.inject(['approval'], (scope: Context) => {
+    scope.approval.enableExternalResponder()
+  })
   const server = new HarnessSdkJsonRpcServer(ctx, transport, {
     maxTokensAsSuccess: resolvedConfig.maxTokensAsSuccess,
   })

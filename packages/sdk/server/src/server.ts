@@ -20,6 +20,7 @@ import type {
   InitializeParams,
   InitializeResult,
   JsonRpcTransportPeer,
+  SessionApprovalRespondParams,
   SessionEventNotification,
   SessionPromptParams,
   SessionPromptResult,
@@ -27,6 +28,8 @@ import type {
   SubagentFinishedNotification,
   SubagentStartedNotification,
 } from '@deepseek-ai/dsh-sdk-protocol'
+import type ApprovalService from '@deepseek-ai/dsh-user-approval'
+import { ApprovalRequestId } from '@deepseek-ai/dsh-user-approval'
 
 interface SessionRecord {
   handle: AgentHandle
@@ -251,11 +254,35 @@ export class HarnessSdkJsonRpcServer {
         return this.initialize(params as unknown as InitializeParams)
       case 'session/prompt':
         return this.prompt(params as unknown as SessionPromptParams)
+      case 'session/approval-respond':
+        return this.approvalRespond(params as unknown as SessionApprovalRespondParams)
       case 'shutdown':
         return this.shutdown()
       default:
         throw new Error(`unknown DeepSeek Harness SDK runtime method: ${method}`)
     }
+  }
+
+  /**
+   * Resolve one parked external approval ask. The SDK server attaches the
+   * external responder at construction, so unanswered asks park (instead of
+   * failing closed) until this method — or the request signal — settles them.
+   * @param params - the asked id and the decision.
+   * @returns an empty object on success; throws on unknown/settled ids.
+   */
+  async approvalRespond(params: SessionApprovalRespondParams): Promise<Record<string, never>> {
+    if (typeof params?.id !== 'string' || params.id.length === 0) {
+      throw new TypeError('approval-respond id must be a non-empty string')
+    }
+    if (params.outcome !== 'allowed-once' && params.outcome !== 'rejected' && params.outcome !== 'cancelled') {
+      throw new TypeError('approval-respond outcome must be allowed-once | rejected | cancelled')
+    }
+    const approval = this.ctx.get('approval') as Pick<ApprovalService, 'respondExternal'> | undefined
+    if (approval === undefined) throw new Error('approval service is not mounted')
+    if (!approval.respondExternal(ApprovalRequestId(params.id), params.outcome)) {
+      throw new Error(`no pending approval ${params.id} (already decided or unknown)`)
+    }
+    return {}
   }
 
   private async getOrCreateSession(sessionId: string): Promise<SessionRecord> {
