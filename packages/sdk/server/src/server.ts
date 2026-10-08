@@ -305,19 +305,41 @@ export class HarnessSdkJsonRpcServer {
     // rows in the host plane, so this agent reads them from the global layer. A
     // deployment that configures a roster has to join one here first
     // (@deepseek-ai/dsh-agent-preset-registry README, "Composing a child agent").
-    const handle = await this.ctx.agents.create({
-      sessionId: brandString<SessionId>(sessionId),
-      meta: { cwd: this.cwd },
-      agentOptions: {
-        provider: this.provider,
-        model: this.model,
-        ...this.reasoningEffort === undefined ? {} : { reasoningEffort: this.reasoningEffort },
-        ...this.maxTokens === undefined ? {} : { maxTokens: this.maxTokens },
-      },
-    })
+    const handle = await this.createOrAdoptSession(sessionId)
     const rec: SessionRecord = { handle }
     this.sessions.set(sessionId, rec)
     return rec
+  }
+
+  /**
+   * Mint `sessionId`, or adopt the persisted session when the store already
+   * knows the id. Cross-process continuation (a fresh runtime continuing a
+   * session logged by a predecessor) reaches this server as an ordinary prompt
+   * carrying the old id; `create` rejects that id, and the registry's
+   * persisted-session resume path is the adoption route. The session's
+   * persisted header owns `meta.cwd` there, so no metadata is passed.
+   * @param sessionId - the wire session id to mint or adopt.
+   * @returns the live handle for the minted or resumed agent.
+   */
+  private async createOrAdoptSession(sessionId: string): Promise<AgentHandle> {
+    const agentOptions = {
+      provider: this.provider,
+      model: this.model,
+      ...this.reasoningEffort === undefined ? {} : { reasoningEffort: this.reasoningEffort },
+      ...this.maxTokens === undefined ? {} : { maxTokens: this.maxTokens },
+    }
+    try {
+      return await this.ctx.agents.create({
+        sessionId: brandString<SessionId>(sessionId),
+        meta: { cwd: this.cwd },
+        agentOptions,
+      })
+    } catch (error) {
+      // The store signals id collision with a plain Error (SessionStore.prepare);
+      // anything else is a real creation failure and must surface unchanged.
+      if (!(error instanceof Error) || !error.message.includes('already exists')) throw error
+      return await this.ctx.agents.resume({ resumeSessionId: brandString<SessionId>(sessionId), agentOptions })
+    }
   }
 
   private hasAdapterFor(provider: string): boolean {

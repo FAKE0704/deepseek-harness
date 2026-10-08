@@ -180,6 +180,51 @@ describe('HarnessSdkJsonRpcServer', () => {
     }
   })
 
+  it('adopts a persisted session when create reports the id already exists', async () => {
+    const followup = vi.fn<Agent['followup']>()
+    const agent = ({ id: SessionId('adopted'), followup } satisfies Pick<Agent, 'id' | 'followup'>) as unknown as Agent
+    const handle = { agent, dispose: vi.fn(() => Promise.resolve()) }
+    const resume = vi.fn(async () => handle)
+    const create = vi.fn(async () => {
+      throw new Error('session "adopted" already exists')
+    })
+    const ctx = {
+      on: vi.fn(() => () => undefined),
+      agents: { create, resume, get: () => agent },
+      get: () => undefined,
+    } as unknown as Context
+    const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+    ;(server as unknown as { initialized: boolean }).initialized = true
+
+    const result = await server.prompt({ sessionId: 'adopted', contentBlocks: [{ type: 'text', text: 'again' }] })
+
+    expect(result.messageId).toBeTypeOf('string')
+    expect(followup).toHaveBeenCalledOnce()
+    expect(create).toHaveBeenCalledOnce()
+    expect(resume).toHaveBeenCalledOnce()
+    expect(resume).toHaveBeenCalledWith(expect.objectContaining({ resumeSessionId: SessionId('adopted') }))
+    await server.shutdown()
+    expect(handle.dispose).toHaveBeenCalledOnce()
+  })
+
+  it('surfaces a real creation failure unchanged (no resume fallback)', async () => {
+    const create = vi.fn(async () => {
+      throw new Error('agent factory exploded')
+    })
+    const resume = vi.fn()
+    const ctx = {
+      on: vi.fn(() => () => undefined),
+      agents: { create, resume, get: () => undefined },
+      get: () => undefined,
+    } as unknown as Context
+    const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+    ;(server as unknown as { initialized: boolean }).initialized = true
+
+    await expect(server.prompt({ sessionId: 'broken', contentBlocks: [{ type: 'text', text: 'x' }] }))
+      .rejects.toThrow('agent factory exploded')
+    expect(resume).not.toHaveBeenCalled()
+  })
+
   it('queues overlapping prompts for one session without blocking other sessions', async () => {
     const mainFollowup = vi.fn<Agent['followup']>()
     const mainAgent = ({
