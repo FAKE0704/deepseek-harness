@@ -43,6 +43,15 @@ export interface SandboxExecutionPolicy {
   /** Absolute root directory `workspace-write` may write under. */
   workspaceRoot: string
   /**
+   * Additional absolute roots `workspace-write` may also write under — the
+   * union with `workspaceRoot` is the mode's boundary. Deployments with more
+   * than one authorized working area (e.g. a host granting several project
+   * roots) set these so confinement does not deny authorized cross-root work.
+   * Backends that cannot express multiple roots (windows-acl) currently
+   * ignore them; absent = single-root, the previous behavior.
+   */
+  extraWritableRoots?: readonly string[]
+  /**
    * Opaque identity of the calling session (the branded `dsh-session`
    * SessionId). Backends key per-session state off it (e.g. windows-acl gives
    * each live session/workspace pair a random private temp directory and SID,

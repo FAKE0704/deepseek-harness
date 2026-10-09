@@ -324,7 +324,15 @@ export class LocalSandboxProvider extends SandboxProvider {
    */
   async confine(argv: readonly string[], policy: SandboxPolicy, signal?: AbortSignal): Promise<ConfinedArgv> {
     signal?.throwIfAborted()
-    policy = { ...policy, workspaceRoot: canonicalPath(policy.workspaceRoot) }
+    // Canonicalize every writable root once: enforcement compares resolved paths
+    // (darwin /tmp → /private/tmp), and profile bind-mount spellings must match
+    // what the policy named. Windows-acl keeps its single-root contract (extra
+    // roots ignored there — see SandboxExecutionPolicy.extraWritableRoots).
+    policy = {
+      ...policy,
+      workspaceRoot: canonicalPath(policy.workspaceRoot),
+      ...(policy.extraWritableRoots !== undefined ? { extraWritableRoots: policy.extraWritableRoots.map(canonicalPath) } : {}),
+    }
     if (this.runnerCommand !== undefined) {
       return Promise.resolve<ConfinedArgv>({
         argv: [...this.runnerCommand, ...bwrapProfileArgs(policy), '--', ...argv],

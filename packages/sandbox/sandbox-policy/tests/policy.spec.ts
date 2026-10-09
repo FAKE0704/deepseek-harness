@@ -15,7 +15,7 @@ import SandboxPolicyService, { SANDBOX_MODES, setSandboxMode } from '@deepseek-a
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt, { renderContextSnapshot, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 
-async function mounted(config: { mode?: 'read-only' | 'workspace-write' | 'danger-full-access'; workspaceRoot?: string } = {}) {
+async function mounted(config: { mode?: 'read-only' | 'workspace-write' | 'danger-full-access'; workspaceRoot?: string; extraWritableRoots?: string[] } = {}) {
   const ctx = new Context()
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SandboxPolicyService, config)
@@ -73,6 +73,22 @@ describe('SandboxPolicyService', () => {
       mode: 'workspace-write',
       workspaceRoot: '/fallback',
     })
+  })
+
+  it('carries configured extra writable roots on every workspace-write resolution', async () => {
+    const ctx = await mounted({ mode: 'workspace-write', workspaceRoot: '/fallback', extraWritableRoots: ['/projects/extra', '/projects/second'] })
+    expect(ctx.sandboxPolicy.resolve()).toEqual({
+      mode: 'workspace-write',
+      workspaceRoot: '/fallback',
+      extraWritableRoots: ['/projects/extra', '/projects/second'],
+    })
+    const withSession = ctx.sandboxPolicy.resolve({ session: session('sess-extra', '/session/cwd') })
+    expect(withSession.extraWritableRoots).toEqual(['/projects/extra', '/projects/second'])
+  })
+
+  it('omits extraWritableRoots entirely when none are configured (single-root shape unchanged)', async () => {
+    const ctx = await mounted({ mode: 'workspace-write', workspaceRoot: '/fallback' })
+    expect(ctx.sandboxPolicy.resolve().extraWritableRoots).toBeUndefined()
   })
 
   it('resolves each session mode and cwd together without changing the fallback', async () => {
