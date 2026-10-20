@@ -312,6 +312,19 @@ export class HarnessClient {
   }
 
   /**
+   * Abort the target session's active activity (`session/interrupt`).
+   * The in-flight turn — including one parked on an approval — ends with the
+   * durable `user` cancel cause; the session survives for followups.
+   * @param sessionId - the target session; must already exist.
+   */
+  async interruptSession(sessionId: string): Promise<void> {
+    const result = await this.request('session/interrupt', { sessionId })
+    if (!isRecord(result) && result !== undefined) {
+      throw new SdkProtocolError(`session/interrupt returned malformed result: ${JSON.stringify(result)}`)
+    }
+  }
+
+  /**
    * Send one JSON-RPC request and await its result.
    * @param method - the wire method name.
    * @param params - the params object; omitted params send `{}`.

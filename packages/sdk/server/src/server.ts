@@ -22,6 +22,7 @@ import type {
   JsonRpcTransportPeer,
   SessionApprovalRespondParams,
   SessionEventNotification,
+  SessionInterruptParams,
   SessionPromptParams,
   SessionPromptResult,
   SdkEncodedImageBlock,
@@ -256,6 +257,8 @@ export class HarnessSdkJsonRpcServer {
         return this.prompt(params as unknown as SessionPromptParams)
       case 'session/approval-respond':
         return this.approvalRespond(params as unknown as SessionApprovalRespondParams)
+      case 'session/interrupt':
+        return this.interrupt(params as unknown as SessionInterruptParams)
       case 'shutdown':
         return this.shutdown()
       default:
@@ -283,6 +286,27 @@ export class HarnessSdkJsonRpcServer {
       throw new Error(`no pending approval ${params.id} (already decided or unknown)`)
     }
     return {}
+  }
+
+  /**
+   * Abort the target session's active activity — its in-flight turn (including
+   * one parked on an external approval) or between-turn task — without
+   * touching the process. The activity ends with the durable `user` cancel
+   * cause and the session survives for followups; cancelling an idle session
+   * is a no-op. Interrupt never creates a session.
+   * @param params - the target session id.
+   * @returns an empty JSON-RPC result; throws on unknown/disposed sessions.
+   */
+  interrupt(params: SessionInterruptParams): Promise<Record<string, never>> {
+    if (!this.initialized) throw new Error('SDK server is not initialized')
+    if (typeof params?.sessionId !== 'string' || params.sessionId.length === 0) {
+      throw new TypeError('interrupt sessionId must be a non-empty string')
+    }
+    const rec = this.sessions.get(params.sessionId)
+    if (rec === undefined) throw new Error(`unknown session ${params.sessionId}`)
+    this.assertLiveAgent(rec, params.sessionId)
+    rec.handle.agent.cancel({ kind: 'user' })
+    return Promise.resolve({})
   }
 
   private async getOrCreateSession(sessionId: string): Promise<SessionRecord> {

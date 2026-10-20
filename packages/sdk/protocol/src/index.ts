@@ -20,6 +20,7 @@ export type {
   SdkRunStatus,
   SessionApprovalRespondParams,
   SessionEventNotification,
+  SessionInterruptParams,
   SessionStatusNotification,
   SessionPromptParams,
   SessionPromptResult,

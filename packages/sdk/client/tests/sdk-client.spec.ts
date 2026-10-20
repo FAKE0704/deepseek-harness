@@ -239,6 +239,27 @@ describe('DeepSeekHarness', () => {
     await harness.close()
   })
 
+  it('interrupts a session through session/interrupt and relays the aborted turn end', async () => {
+    const client = processClient(fakeLaunch())
+    const subscription = client.subscribe(n => n.method === 'session.event'
+      && (n.params as { event?: { type?: string } }).event?.type === 'turn/end')
+    try {
+      await client.prompt('s-int', [{ type: 'text', text: 'work' }])
+      // Drain the prompt's own (completed) turn end before interrupting.
+      const promptEnd = await subscription.next()
+      expect((promptEnd.params as { event: { data?: { reason?: { kind: string } } } }).event.data?.reason?.kind).toBe('completed')
+      await client.interruptSession('s-int')
+      const notification = await subscription.next()
+      expect(notification.params).toMatchObject({ sessionId: 's-int' })
+      const event = (notification.params as { event: { data: { reason: { kind: string; reason?: { kind: string } } } } }).event
+      expect(event.data.reason.kind).toBe('aborted')
+      expect(event.data.reason.reason?.kind).toBe('user')
+    } finally {
+      subscription.close()
+      await client.close()
+    }
+  })
+
   it('keeps events root-scoped while streaming notifications for the session tree', async () => {
     const harness = harnessWith({ FAKE_SUBAGENT: '1' })
     const seen: HarnessNotification[] = []

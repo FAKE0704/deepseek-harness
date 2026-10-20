@@ -66,6 +66,12 @@ export interface SessionApprovalRespondParams {
   outcome: 'allowed-once' | 'rejected' | 'cancelled'
 }
 
+/** `session/interrupt` params: abort the target session's active activity. */
+export interface SessionInterruptParams {
+  /** The SDK-side session id; must already exist (interrupt never creates). */
+  sessionId: string
+}
+
 /** Deployment-mapped SDK outcome: `ok` for an accepted result, `error` otherwise. */
 export type SdkRunStatus = 'ok' | 'error'
 
@@ -124,5 +130,6 @@ export interface HarnessSdkRequestMap {
   'initialize': { params: InitializeParams; result: InitializeResult }
   'session/prompt': { params: SessionPromptParams; result: SessionPromptResult }
   'session/approval-respond': { params: SessionApprovalRespondParams; result: Record<string, never> }
+  'session/interrupt': { params: SessionInterruptParams; result: Record<string, never> }
   'shutdown': { params: undefined; result: Record<string, never> }
 }

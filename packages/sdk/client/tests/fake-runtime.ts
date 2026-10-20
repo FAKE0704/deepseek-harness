@@ -311,6 +311,13 @@ reader.on('line', (line) => {
       respond({ messageId })
       return
     }
+    case 'session/interrupt': {
+      const sessionId = sessionIdOf(frame.params)
+      event(sessionId, 'turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } })
+      notify('session.status', { sessionId, status: 'idle' })
+      respond({})
+      return
+    }
     case 'shutdown':
       respond({})
       // An EOF-ignoring fake also refuses the protocol exit, so the client's

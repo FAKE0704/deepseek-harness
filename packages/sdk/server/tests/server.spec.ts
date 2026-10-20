@@ -1137,6 +1137,86 @@ describe('HarnessSdkJsonRpcServer', () => {
     }
   })
 
+  it('interrupts an active turn with the durable user cause and the session survives', { timeout: 15_000 }, async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-interrupt-'))
+    // Gated completion server: hold the SSE response so the turn stays in flight.
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const requests: unknown[] = []
+    const gatedServer = createServer((request: IncomingMessage, response: ServerResponse) => {
+      let body = ''
+      request.on('data', (chunk: Buffer) => { body += chunk.toString('utf8') })
+      request.on('end', () => {
+        requests.push(JSON.parse(body))
+        void gate.then(() => {
+          if (response.destroyed) return
+          response.on('error', () => undefined)
+          response.writeHead(200, { 'content-type': 'text/event-stream' })
+          response.end(MESSAGES_RESPONSE)
+        })
+      })
+    })
+    servers.push(gatedServer)
+    await new Promise<void>(resolve => gatedServer.listen(0, '127.0.0.1', resolve))
+    const gatedAddress = gatedServer.address()
+    if (gatedAddress === null || typeof gatedAddress === 'string') throw new Error('no port')
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubEnv('DEEPSEEK_BASE_URL', `http://127.0.0.1:${gatedAddress.port}`)
+    const ctx = await makeHarness(storageDir)
+    try {
+      const transport = new FakeTransport()
+      const server = new HarnessSdkJsonRpcServer(ctx, transport)
+      await server.handleRequest('initialize', {
+        cwd: storageDir,
+        provider: 'deepseek-official',
+        model: 'dsagent-model',
+      })
+      await server.handleRequest('session/prompt', {
+        sessionId: 'main',
+        contentBlocks: [{ type: 'text', text: 'long turn' }],
+      })
+      await vi.waitFor(() => { expect(requests).toHaveLength(1) })
+
+      // Wire-boundary validation; interrupt never creates a session.
+      await expect(server.handleRequest('session/interrupt', { sessionId: '' })).rejects.toThrow(TypeError)
+      await expect(server.handleRequest('session/interrupt', { sessionId: 'ghost' })).rejects.toThrow(/unknown session/)
+
+      // Interrupt the in-flight turn: empty result, activity aborts, back to idle.
+      expect(await server.handleRequest('session/interrupt', { sessionId: 'main' })).toEqual({})
+      await vi.waitFor(() => {
+        expect(transport.notifications.findLast(n => n.method === 'session.status')).toEqual({
+          method: 'session.status',
+          params: { sessionId: 'main', status: 'idle' },
+        })
+      })
+      const turnEnd = transport.notifications
+        .filter(n => n.method === 'session.event')
+        .map(n => (n.params as { event: { type: string; data: { reason: { kind: string; reason?: { kind: string } } } } }).event)
+        .findLast(e => e.type === 'turn/end')
+      expect(turnEnd?.data.reason.kind).toBe('aborted')
+      expect(turnEnd?.data.reason.reason?.kind).toBe('user')
+
+      // The session survives: a followup completes normally on the released gate.
+      release()
+      await server.handleRequest('session/prompt', {
+        sessionId: 'main',
+        contentBlocks: [{ type: 'text', text: 'again' }],
+      })
+      await vi.waitFor(() => { expect(requests).toHaveLength(2) })
+      await vi.waitFor(() => {
+        expect(transport.notifications.findLast(n => n.method === 'session.status')).toEqual({
+          method: 'session.status',
+          params: { sessionId: 'main', status: 'idle' },
+        })
+      })
+
+      await server.handleRequest('shutdown', undefined)
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
   it('coalesces concurrent session creation and retries a failed creation', async () => {
     let resolveShared: ((handle: AgentHandle) => void) | undefined
     const sharedCreation = new Promise<AgentHandle>((resolve) => { resolveShared = resolve })
