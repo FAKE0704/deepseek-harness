@@ -37,6 +37,7 @@ import { installProxyFromEnvironment } from '@deepseek-ai/dsh-http-proxy'
 import { DSH_LAUNCH_ENVIRONMENT_KEY, type LaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import { provideCmdline, type AppReady } from '@deepseek-ai/dsh-cmdline'
 import { createProcessShutdown, type ProcessShutdown } from './process-shutdown.ts'
+import { installFlightRecorder } from './flight-recorder.ts'
 
 const NAME = 'dsh'
 
@@ -277,6 +278,15 @@ export async function runProfile(options: RunProfileOptions): Promise<{ ctx: Con
     // SIGTERM is a supervisor's ordinary stop request and exits 0 on every
     // surface — the launcher does not know whether the app considered its work
     // complete; SIGINT is a user interrupt and reports 130.
+    // The flight recorder registers its signal/EOF/exit listeners first so the
+    // teardown initiator is timestamped before any disposal begins (132号:
+    // approval-parked deaths previously left zero kernel-side evidence).
+    installFlightRecorder({
+      home: resolveDshHome(),
+      profile: options.profile,
+      stderr: process.stderr,
+      stdin: process.stdin,
+    })
     process.on('SIGTERM', () => { interrupt(0) })
     process.on('SIGINT', () => { interrupt(130) })
     installFailLoud(NAME, process, async () => {
