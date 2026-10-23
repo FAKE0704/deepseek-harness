@@ -22,6 +22,8 @@ export type {
   SessionEventNotification,
   SessionInterruptParams,
   SessionStatusNotification,
+  SessionStreamFrame,
+  SessionStreamNotification,
   SessionPromptParams,
   SessionPromptResult,
   SubagentFinishedNotification,

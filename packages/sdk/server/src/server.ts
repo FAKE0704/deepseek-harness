@@ -8,7 +8,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { resolve } from 'node:path'
 import { brandString } from '@deepseek-ai/dsh-brand'
-import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { admitEncodedImages, type EncodedImageAttachment, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, ReasoningEffortId, type ContentBlock, type LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { carrierKeyOf, type Scoped } from '@deepseek-ai/dsh-scope'
@@ -25,6 +25,8 @@ import type {
   SessionInterruptParams,
   SessionPromptParams,
   SessionPromptResult,
+  SessionStreamFrame,
+  SessionStreamNotification,
   SdkEncodedImageBlock,
   SubagentFinishedNotification,
   SubagentStartedNotification,
@@ -58,6 +60,23 @@ async function durablePromptContent(ctx: Context, blocks: SessionPromptParams['c
 /** Recover the delegating parent from the service-owned scoped carrier. */
 function subagentParentOf(carrier: Scoped<SubagentRuntime>): Agent {
   return carrierKeyOf(carrier) as Agent
+}
+
+/** Last durable session seq committed before `nextSeq` would land; -1 before any event. */
+function cursorBeforeNext(nextSeq: number): number {
+  return nextSeq === 0 ? -1 : nextSeq - 1
+}
+
+/**
+ * Wire form of one assistant stream frame, aligned with the session-controller
+ * history projection's `wireAssistantStreamFrame`: `start` frames gain the
+ * durable reconciliation cursor (`startedAfterSeq`), `chunk`/`end` frames
+ * publish verbatim — every attempt settles through exactly one terminal `end`.
+ */
+function sessionStreamFrame(frame: AssistantStreamFrame, nextSeq: number): SessionStreamFrame {
+  return frame.type === 'start'
+    ? { ...frame, startedAfterSeq: cursorBeforeNext(nextSeq) }
+    : frame
 }
 
 /** Deployment-specific status mapping for SDK turn and subagent outcomes. */
@@ -102,6 +121,13 @@ export class HarnessSdkJsonRpcServer {
     }))
     this.disposers.push(ctx.on('agent/status', ({ agent, status }) => {
       this.transport.notify('session.status', { sessionId: String(agent.session.id), status })
+    }))
+    this.disposers.push(ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+      const payload: SessionStreamNotification = {
+        sessionId: String(agent.session.id),
+        frame: sessionStreamFrame(frame, agent.session.seq),
+      }
+      this.transport.notify('session.stream', payload)
     }))
     this.disposers.push(ctx.on('session/created', (session) => {
       const parentSession = session.header.parentSession

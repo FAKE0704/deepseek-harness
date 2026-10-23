@@ -1,6 +1,6 @@
 /**
  * Named wire types for the DeepSeek Harness SDK runtime protocol: the three
- * request/result pairs and the four server-to-client notification payloads
+ * request/result pairs and the five server-to-client notification payloads
  * exchanged over the newline-delimited JSON-RPC stdio transport. The server
  * plugin (`@deepseek-ai/dsh-sdk-jsonrpc-server`) and SDK clients share these shapes;
  * `serverInfo.name` stays the wire-stable `deepseek-harness-sdk-runtime`.
@@ -8,7 +8,7 @@
  * @module @deepseek-ai/dsh-sdk-protocol/types
  */
 
-import type { ContentBlock, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, ReasoningEffortId, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SubagentStopReason } from '@deepseek-ai/dsh-subagent'
 
@@ -117,10 +117,65 @@ export interface SubagentFinishedNotification {
   lastAssistantMessage?: ContentBlock[]
 }
 
+/**
+ * One process-local assistant stream frame in its SDK wire form, isomorphic to
+ * the session-controller history projection's `SessionAssistantStreamFrame`:
+ * every LLM attempt publishes `start` → `chunk`* → `end` exactly once, frames
+ * are live notifications only (never persisted), and the terminal `end` frame
+ * settles the attempt — `committed` names the durable event that superseded
+ * the streamed text, `abandoned` marks an attempt with no durable commit
+ * (including interrupted prefixes that could not land).
+ */
+export type SessionStreamFrame =
+  | {
+    readonly type: 'start'
+    readonly attemptId: string
+    /** Monotone within one attached Agent lifecycle; replacement restarts at 1. */
+    readonly revision: number
+    /** Last durable session seq committed when this attempt started; -1 before any event. */
+    readonly startedAfterSeq: number
+    readonly turn: number
+    readonly step: number
+  }
+  | {
+    readonly type: 'chunk'
+    readonly attemptId: string
+    readonly revision: number
+    /** Dense zero-based position within the attempt. */
+    readonly index: number
+    /** Safe-integer timestamp reused by the durable embedded stream. */
+    readonly time: number
+    readonly chunk: StreamChunk
+  }
+  | {
+    readonly type: 'end'
+    readonly attemptId: string
+    readonly revision: number
+    /** Number of chunk frames emitted by this attempt. */
+    readonly index: number
+    /** Durable settlement committed before this frame, or live abandonment without one. */
+    readonly outcome:
+      | {
+        readonly kind: 'committed'
+        readonly eventType: 'assistant/message' | 'assistant/attempt'
+        readonly seq: number
+      }
+      | { readonly kind: 'abandoned' }
+  }
+
+/** `session.stream` payload: one live assistant stream frame, forwarded as it publishes. */
+export interface SessionStreamNotification {
+  /** Session whose agent is streaming (every session in the runtime, not only SDK-created ones). */
+  sessionId: string
+  /** The frame in wire form. */
+  frame: SessionStreamFrame
+}
+
 /** Server-to-client notifications by JSON-RPC method name. */
 export interface HarnessSdkNotificationMap {
   'session.event': SessionEventNotification
   'session.status': SessionStatusNotification
+  'session.stream': SessionStreamNotification
   'subagent.started': SubagentStartedNotification
   'subagent.finished': SubagentFinishedNotification
 }

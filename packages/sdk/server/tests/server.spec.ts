@@ -1,5 +1,5 @@
 import { MESSAGES_RESPONSE } from './messages-response.ts'
-import { createUserMessage, LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, LlmAdapter, LlmAttemptId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
@@ -8,15 +8,15 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry, { type Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { type Agent, type AgentHandle, type AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
 import SubagentRuntime, { type SubagentResult, type SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
-import type { JsonRpcTransportPeer } from '@deepseek-ai/dsh-sdk-protocol'
+import type { JsonRpcTransportPeer, SessionStreamFrame } from '@deepseek-ai/dsh-sdk-protocol'
 import { HarnessSdkJsonRpcServer } from '../src/index.ts'
 
 class FakeTransport implements JsonRpcTransportPeer {
@@ -416,6 +416,93 @@ describe('HarnessSdkJsonRpcServer', () => {
       ])
     await server.shutdown()
     await ctx.fiber.dispose()
+  })
+
+  it('forwards assistant stream frames as session.stream notifications with a durable start cursor', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(AgentRegistry)
+    const transport = new FakeTransport()
+    const server = new HarnessSdkJsonRpcServer(ctx, transport)
+    const session = ctx.sessions.create(SessionId('stream-outcome'))
+    const agent = ({
+      id: SessionId('stream-outcome'),
+      session,
+    } satisfies Pick<Agent, 'id' | 'session'>) as Agent
+
+    const startedAfterSeq = session.seq === 0 ? -1 : session.seq - 1
+    const frames: AssistantStreamFrame[] = [
+      { type: 'start', attemptId: LlmAttemptId('stream-outcome:0'), revision: 1, turn: 0, step: 0 },
+      { type: 'chunk', attemptId: LlmAttemptId('stream-outcome:0'), revision: 2, index: 0, time: 1, chunk: { type: 'text-delta', index: 0, text: 'He' } },
+      { type: 'chunk', attemptId: LlmAttemptId('stream-outcome:0'), revision: 3, index: 1, time: 2, chunk: { type: 'text-delta', index: 0, text: 'llo' } },
+      { type: 'end', attemptId: LlmAttemptId('stream-outcome:0'), revision: 4, index: 2, outcome: { kind: 'committed', eventType: 'assistant/message', seq: SessionSeq(0) } },
+    ]
+    for (const frame of frames) ctx.emit('agent/assistant-stream', { agent, frame })
+
+    expect(transport.notifications.filter(notification => notification.method === 'session.stream'))
+      .toEqual(frames.map(frame => ({
+        method: 'session.stream',
+        params: { sessionId: 'stream-outcome', frame: frame.type === 'start' ? { ...frame, startedAfterSeq } : frame },
+      })))
+    expect(transport.notifications.some(notification => notification.method === 'session.event')).toBe(false)
+    await server.shutdown()
+    await ctx.fiber.dispose()
+  })
+
+  it('forwards live chunk frames during one streamed turn and settles the attempt durably', { timeout: 15_000 }, async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-stream-'))
+    const llmServer = await mockCompletionServer()
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubEnv('DEEPSEEK_BASE_URL', llmServer.url)
+    const ctx = await makeHarness(storageDir)
+    try {
+      const transport = new FakeTransport()
+      const server = new HarnessSdkJsonRpcServer(ctx, transport)
+      await server.handleRequest('initialize', {
+        cwd: storageDir,
+        provider: 'deepseek-official',
+        model: 'dsagent-model',
+      })
+      await server.handleRequest('session/prompt', {
+        sessionId: 'main',
+        contentBlocks: [{ type: 'text', text: 'say done' }],
+      })
+      await vi.waitFor(() => {
+        expect(transport.notifications.findLast(n => n.method === 'session.status')).toEqual({
+          method: 'session.status',
+          params: { sessionId: 'main', status: 'idle' },
+        })
+      })
+
+      const frames = transport.notifications
+        .filter(n => n.method === 'session.stream' && (n.params as { sessionId?: string }).sessionId === 'main')
+        .map(n => (n.params as { frame: SessionStreamFrame }).frame)
+      expect(frames.length).toBeGreaterThanOrEqual(3)
+      const first = frames[0]
+      expect(first && first.type === 'start' ? first.revision : undefined).toBe(1)
+      expect(typeof (first && first.type === 'start' ? first.startedAfterSeq : undefined)).toBe('number')
+      const terminal = frames.at(-1)
+      expect(terminal?.type === 'end' && terminal.outcome.kind).toBe('committed')
+
+      const revisions = frames.map(frame => frame.revision)
+      expect(revisions).toEqual([...revisions].sort((a, b) => a - b))
+      for (const value of new Set(revisions)) expect(revisions.indexOf(value)).toBe(revisions.lastIndexOf(value))
+
+      const chunks = frames.filter((frame): frame is Extract<SessionStreamFrame, { type: 'chunk' }> => frame.type === 'chunk')
+      expect(chunks.map(chunk => chunk.index)).toEqual(chunks.map((_, i) => i))
+      expect(chunks.filter(chunk => chunk.chunk.type === 'text-delta').map(chunk => chunk.chunk.type === 'text-delta' ? chunk.chunk.text : '').join('')).toBe('done')
+
+      // Live traffic precedes the idle settlement: streaming happened during generation, not on completion.
+      const lastStream = transport.notifications.findLastIndex(n => n.method === 'session.stream')
+      const idle = transport.notifications.findLastIndex(n => n.method === 'session.status' && (n.params as { status?: string }).status === 'idle')
+      expect(lastStream).toBeGreaterThan(-1)
+      expect(lastStream).toBeLessThan(idle)
+
+      await server.handleRequest('shutdown', undefined)
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
   })
 
   it('notifies the host when a child session is created with parent lineage', async () => {
@@ -1324,6 +1411,6 @@ describe('HarnessSdkJsonRpcServer', () => {
     const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
 
     await expect(server.shutdown()).rejects.toBe(listenerFailure)
-    expect(on).toHaveBeenCalledTimes(4)
+    expect(on).toHaveBeenCalledTimes(5)
   })
 })

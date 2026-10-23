@@ -360,7 +360,11 @@ async function hydrateReplayFixtures(scenario: CorpusScenario, cwd: string): Pro
 /**
  * Normalize the SDK-visible notification stream: embedded `session.event`
  * envelopes get the session-log treatment (times zeroed, headers tokenized),
- * then every record is scrubbed like a wire frame.
+ * then every record is scrubbed like a wire frame. Live `session.stream`
+ * assistant frames are excluded: they are process-local transport (wall-clock
+ * `time`, chunk interleaving) whose durable counterpart — the committed
+ * assistant events — is already pinned in full; the frame stream itself has
+ * deterministic keyless coverage in the SDK server specs.
  */
 function normalizeNotifications(notifications: readonly HarnessNotification[], ctx: NormalizeContext): string {
   const events = notifications
@@ -379,11 +383,13 @@ function normalizeNotifications(notifications: readonly HarnessNotification[], c
       typedFeedback ? { identityMode: 'preserve' } : {},
     )).trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
   let eventIndex = 0
-  const records = notifications.map((notification) => {
-    if (notification.method !== 'session.event') return { method: notification.method, params: notification.params }
-    const event = normalizedEvents[eventIndex++]
-    return { method: notification.method, params: { ...notification.params, event } }
-  })
+  const records = notifications
+    .filter(n => n.method !== 'session.stream')
+    .map((notification) => {
+      if (notification.method !== 'session.event') return { method: notification.method, params: notification.params }
+      const event = normalizedEvents[eventIndex++]
+      return { method: notification.method, params: { ...notification.params, event } }
+    })
   let output = records.map(record => JSON.stringify(record)).join('\n') + '\n'
   if (typedFeedback) {
     for (const [index, id] of ctx.sessionIds.entries()) output = output.replaceAll(id, '{{session:' + (index + 1) + '}}')
