@@ -12,6 +12,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { createLaunchEnvironmentSnapshot, DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import * as jsonrpc from '../src/index.ts'
 
@@ -30,6 +31,8 @@ type WireEvent =
 
 interface ApplyHarness {
   ctx: Context
+  /** The transport input stream, for driving an EOF. */
+  input: PassThrough
   /** The plugin fiber used by the bare-dispose case. */
   fiber: Awaited<ReturnType<Context['plugin']>>
   /** Frames, write completions, and exits in observation order. */
@@ -72,6 +75,7 @@ async function mountPlugin(
   options: {
     writeDelayMs?: number
     failFlush?: boolean
+    eofExitGraceMs?: number
     beforeServer?: (ctx: Context) => Promise<void> | void
   } = {},
 ): Promise<ApplyHarness> {
@@ -123,6 +127,7 @@ async function mountPlugin(
     input,
     output,
     exit,
+    ...(options.eofExitGraceMs === undefined ? {} : { eofExitGraceMs: options.eofExitGraceMs }),
   })
 
   const frames = (): Record<string, unknown>[] =>
@@ -130,6 +135,7 @@ async function mountPlugin(
   return {
     ctx,
     fiber,
+    input,
     events,
     outputErrors,
     send: (frame) => { input.write(`${JSON.stringify(frame)}\n`) },
@@ -373,6 +379,382 @@ describe('dsh-sdk-jsonrpc-server plugin apply', () => {
     } finally {
       await harness.dispose()
       await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+})
+
+/** Clear the EOF grace env for one test body, restoring it afterwards. */
+async function withoutEofEnv(run: () => Promise<void>): Promise<void> {
+  const previous = process.env.DSH_SDK_EOF_EXIT_GRACE_MS
+  delete process.env.DSH_SDK_EOF_EXIT_GRACE_MS
+  try {
+    await run()
+  } finally {
+    if (previous !== undefined) process.env.DSH_SDK_EOF_EXIT_GRACE_MS = previous
+  }
+}
+
+/** Release the test worker from a plugin mount whose disposal is deliberately hung. */
+async function abandon(harness: ApplyHarness, storageDir: string): Promise<void> {
+  await Promise.race([harness.dispose(), new Promise(resolve => setTimeout(resolve, 500))])
+  await rm(storageDir, { recursive: true, force: true })
+}
+
+describe('dsh-sdk-jsonrpc-server EOF bounded self-exit', () => {
+  it('merges a shutdown RPC landing inside the grace window into exactly one dispose and exit', async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-merge-'))
+    const harness = await mountPlugin(storageDir, { eofExitGraceMs: 80 })
+    try {
+      // The RPC task starts first; the EOF timer must join it, not re-run it.
+      harness.send({ jsonrpc: '2.0', id: 'sd-eof-merge', method: 'shutdown' })
+      harness.input.end()
+      await waitFor(() => harness.exits().length > 0 ? true : undefined, 'merged exit')
+      expect(harness.exits()).toEqual([0])
+      expect(harness.events.filter(event => event.kind === 'root-disposed')).toHaveLength(1)
+      await settle()
+      expect(harness.exits()).toEqual([0])
+      expect(harness.events.filter(event => event.kind === 'root-disposed')).toHaveLength(1)
+    } finally {
+      await harness.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
+  it('exits through a shutdown RPC that beats a long grace window, with the later timer a no-op', { timeout: 10_000 }, async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-beat-'))
+    const harness = await mountPlugin(storageDir, { eofExitGraceMs: 2000 })
+    try {
+      harness.send({ jsonrpc: '2.0', id: 'sd-eof-beat', method: 'shutdown' })
+      harness.input.end()
+      // Well inside the 2000ms grace: the RPC path must win immediately.
+      const deadline = Date.now() + 1200
+      while (harness.exits().length === 0 && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 5))
+      }
+      expect(harness.exits()).toEqual([0])
+      expect(harness.events.filter(event => event.kind === 'root-disposed')).toHaveLength(1)
+      // The grace timer fires afterwards and must be a no-op.
+      await new Promise(resolve => setTimeout(resolve, 2200))
+      expect(harness.exits()).toEqual([0])
+      expect(harness.events.filter(event => event.kind === 'root-disposed')).toHaveLength(1)
+    } finally {
+      await harness.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps EOF a no-op when the grace is disabled via config', async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eoff-config-'))
+    const harness = await mountPlugin(storageDir, { eofExitGraceMs: -1 })
+    try {
+      harness.input.end()
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(harness.exits()).toEqual([])
+      expect(harness.events.some(event => event.kind === 'root-disposed')).toBe(false)
+    } finally {
+      await harness.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps EOF a no-op when the grace is disabled via the env off value', async () => {
+    vi.stubEnv('DSH_SDK_EOF_EXIT_GRACE_MS', 'off')
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eoff-env-'))
+    const harness = await mountPlugin(storageDir)
+    try {
+      harness.input.end()
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(harness.exits()).toEqual([])
+      expect(harness.events.some(event => event.kind === 'root-disposed')).toBe(false)
+    } finally {
+      await harness.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
+  it('exits through the full dispose path on a zero grace', async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-zero-'))
+    const harness = await mountPlugin(storageDir, { eofExitGraceMs: 0 })
+    try {
+      harness.input.end()
+      await waitFor(() => harness.exits().length > 0 ? true : undefined, 'zero-grace exit')
+      expect(harness.exits()).toEqual([0])
+      expect(harness.events.filter(event => event.kind === 'root-disposed')).toHaveLength(1)
+    } finally {
+      await harness.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
+  it('detaches the EOF listener and cancels the armed timer on effect disposal', { timeout: 10_000 }, async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-detach-'))
+    const harness = await mountPlugin(storageDir, { eofExitGraceMs: 60 })
+    try {
+      // EOF then immediate disposal: the armed timer must be cancelled.
+      harness.input.end()
+      await harness.fiber.dispose()
+      await new Promise(resolve => setTimeout(resolve, 150))
+      expect(harness.exits()).toEqual([])
+    } finally {
+      await harness.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+
+    const laterDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-detach2-'))
+    const later = await mountPlugin(laterDir, { eofExitGraceMs: 60 })
+    try {
+      // Disposal without an EOF detaches the listener: a later EOF is inert.
+      await later.fiber.dispose()
+      later.input.end()
+      await new Promise(resolve => setTimeout(resolve, 150))
+      expect(later.exits()).toEqual([])
+    } finally {
+      await later.dispose()
+      await rm(laterDir, { recursive: true, force: true })
+    }
+  })
+
+  it('defaults an injected test input to disabled', async () => {
+    await withoutEofEnv(async () => {
+      const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-default-'))
+      const harness = await mountPlugin(storageDir)
+      try {
+        harness.input.end()
+        await new Promise(resolve => setTimeout(resolve, 100))
+        expect(harness.exits()).toEqual([])
+        expect(harness.events.some(event => event.kind === 'root-disposed')).toBe(false)
+      } finally {
+        await harness.dispose()
+        await rm(storageDir, { recursive: true, force: true })
+      }
+    })
+  })
+
+  it('keeps the transport drain-then-stop semantics unchanged across EOF', async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-drain-'))
+    const harness = await mountPlugin(storageDir, { eofExitGraceMs: 60 })
+    try {
+      // The complete line rides the same chunk batch as the EOF: drain still lands it.
+      harness.send({ jsonrpc: '2.0', id: 'eof-drain', method: 'nope/unknown' })
+      harness.input.end()
+      const drained = await harness.waitForFrame(frame => frame.id === 'eof-drain', 'response drained before EOF')
+      expect(drained.error).toMatchObject({ code: -32603 })
+      await waitFor(() => harness.exits().length > 0 ? true : undefined, 'exit after grace')
+      expect(harness.exits()).toEqual([0])
+      // Frames after the EOF never produce responses.
+      const before = harness.frames().length
+      harness.send({ jsonrpc: '2.0', id: 'post-eof', method: 'nope/unknown' })
+      await settle()
+      expect(harness.frames().length).toBe(before)
+    } finally {
+      await harness.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
+  it('swallows a synchronously throwing stderr write on the suicide path', async () => {
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => {
+      throw new Error('dead pipe')
+    })
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-throw-'))
+    const harness = await mountPlugin(storageDir, { eofExitGraceMs: 40 })
+    try {
+      harness.input.end()
+      await waitFor(() => harness.exits().length > 0 ? true : undefined, 'exit despite stderr throw')
+      expect(harness.exits()).toEqual([0])
+    } finally {
+      spy.mockRestore()
+      await harness.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
+  it('absorbs an asynchronous stderr EPIPE on the suicide path and still notifies once', { timeout: 10_000 }, async () => {
+    const stderrWrites: string[] = []
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(function (this: NodeJS.WriteStream, chunk: unknown, callback?: (error?: Error | null) => void) {
+      stderrWrites.push(String(chunk))
+      queueMicrotask(() => {
+        this.emit('error', new Error('EPIPE'))
+        callback?.(new Error('EPIPE'))
+      })
+      return true
+    } as typeof process.stderr.write)
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-epipe-'))
+    const harness = await mountPlugin(storageDir, { eofExitGraceMs: 40 })
+    try {
+      harness.input.end()
+      await waitFor(() => harness.exits().length > 0 ? true : undefined, 'exit despite EPIPE')
+      expect(harness.exits()).toEqual([0])
+      expect(stderrWrites).toEqual(['[sdk-jsonrpc-server] input closed; exiting in 40ms\n'])
+    } finally {
+      spy.mockRestore()
+      await harness.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
+  it('warns and falls through the tiers on invalid grace values', async () => {
+    const stderrWrites: string[] = []
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: unknown, callback?: (error?: Error | null) => void) => {
+      stderrWrites.push(String(chunk))
+      callback?.()
+      return true
+    }) as typeof process.stderr.write)
+    try {
+      // Config tier invalid (NaN): warns, falls to the default (injected input = disabled).
+      const configDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-nan-'))
+      const configHarness = await mountPlugin(configDir, { eofExitGraceMs: Number.NaN })
+      try {
+        configHarness.input.end()
+        await new Promise(resolve => setTimeout(resolve, 100))
+        expect(configHarness.exits()).toEqual([])
+        expect(stderrWrites.join('')).toContain('invalid DSH_SDK_EOF_EXIT_GRACE_MS value NaN; ignoring')
+      } finally {
+        await configHarness.dispose()
+        await rm(configDir, { recursive: true, force: true })
+      }
+
+      // Env tier invalid string: warns, falls to the default (disabled).
+      vi.stubEnv('DSH_SDK_EOF_EXIT_GRACE_MS', 'abc')
+      const envDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-abc-'))
+      const envHarness = await mountPlugin(envDir)
+      try {
+        envHarness.input.end()
+        await new Promise(resolve => setTimeout(resolve, 100))
+        expect(envHarness.exits()).toEqual([])
+        expect(stderrWrites.join('')).toContain('invalid DSH_SDK_EOF_EXIT_GRACE_MS value "abc"; ignoring')
+      } finally {
+        await envHarness.dispose()
+        await rm(envDir, { recursive: true, force: true })
+      }
+
+      // Env tier negative: disabled without a warning.
+      vi.stubEnv('DSH_SDK_EOF_EXIT_GRACE_MS', '-3')
+      const negativeDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-neg-'))
+      const negativeHarness = await mountPlugin(negativeDir)
+      try {
+        negativeHarness.input.end()
+        await new Promise(resolve => setTimeout(resolve, 100))
+        expect(negativeHarness.exits()).toEqual([])
+        expect(stderrWrites).toHaveLength(2)
+      } finally {
+        await negativeHarness.dispose()
+        await rm(negativeDir, { recursive: true, force: true })
+      }
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('applies the env numeric value in milliseconds, including zero', async () => {
+    vi.stubEnv('DSH_SDK_EOF_EXIT_GRACE_MS', '30')
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-env30-'))
+    const harness = await mountPlugin(storageDir)
+    try {
+      harness.input.end()
+      await waitFor(() => harness.exits().length > 0 ? true : undefined, 'env-grace exit')
+      expect(harness.exits()).toEqual([0])
+      expect(harness.events.filter(event => event.kind === 'root-disposed')).toHaveLength(1)
+    } finally {
+      await harness.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+
+    vi.stubEnv('DSH_SDK_EOF_EXIT_GRACE_MS', '0')
+    const zeroDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-env0-'))
+    const zeroHarness = await mountPlugin(zeroDir)
+    try {
+      zeroHarness.input.end()
+      await waitFor(() => zeroHarness.exits().length > 0 ? true : undefined, 'env-zero exit')
+      expect(zeroHarness.exits()).toEqual([0])
+    } finally {
+      await zeroHarness.dispose()
+      await rm(zeroDir, { recursive: true, force: true })
+    }
+  })
+
+  it('resolves the production stdin shape to the five-second default', async () => {
+    // No input override: resolution must fall through to the default grace.
+    // It arms only on a real EOF, which the worker's idle stdin never produces.
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-stdin-'))
+    const ctx = new Context()
+    await mountAgentLoopTestDependencies(ctx)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    await ctx.plugin(JsonlSessionPersistence, { root: storageDir })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const exits: number[] = []
+    const fiber = await ctx.plugin(jsonrpc, {
+      output: new Writable({ write: (_chunk, _encoding, callback) => { callback() } }),
+      exit: (code) => { exits.push(code) },
+    })
+    try {
+      await settle()
+      expect(exits).toEqual([])
+    } finally {
+      await fiber.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
+  it('prefers the launch-environment snapshot over the inherited environment', async () => {
+    vi.stubEnv('DSH_SDK_EOF_EXIT_GRACE_MS', 'off')
+    // The snapshot layer says 50ms; only a snapshot-preferring read exits.
+    const snapshot = createLaunchEnvironmentSnapshot([{
+      source: 'process',
+      values: { ...process.env, DSH_SDK_EOF_EXIT_GRACE_MS: '50' },
+    }])
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-snap-'))
+    const harness = await mountPlugin(storageDir, {
+      beforeServer: (ctx) => { ctx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, snapshot) },
+    })
+    try {
+      harness.input.end()
+      await waitFor(() => harness.exits().length > 0 ? true : undefined, 'snapshot-grace exit')
+      expect(harness.exits()).toEqual([0])
+    } finally {
+      await harness.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
+  it('forces the exit when the flush barrier hangs past the flush deadline', { timeout: 15_000 }, async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-flushdl-'))
+    const harness = await mountPlugin(storageDir, { eofExitGraceMs: 30, writeDelayMs: 100_000 })
+    try {
+      harness.input.end()
+      await waitFor(() => harness.exits().length > 0 ? true : undefined, 'flush-deadline exit')
+      expect(harness.exits()).toEqual([0])
+      // The dispose stage never ran: the deadline cut in ahead of it.
+      expect(harness.events.some(event => event.kind === 'root-disposed')).toBe(false)
+    } finally {
+      await abandon(harness, storageDir)
+    }
+  })
+
+  it('forces the exit when root disposal hangs past the dispose deadline', { timeout: 30_000 }, async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-disposedl-'))
+    const harness = await mountPlugin(storageDir, {
+      eofExitGraceMs: 30,
+      beforeServer: (ctx) => {
+        ctx.effect(() => () => new Promise<void>(() => { /* deliberately hung disposal */ }), 'hung root disposal witness')
+      },
+    })
+    try {
+      harness.input.end()
+      const startedAt = Date.now()
+      const deadline = startedAt + 14_000
+      while (harness.exits().length === 0 && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+      expect(harness.exits().length).toBeGreaterThan(0)
+      // The flush stage settles in milliseconds; only the 10s dispose deadline explains this exit.
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(9000)
+      expect(harness.exits()).toEqual([0])
+      // The dispose stage did start (its synchronous witness ran); the deadline
+      // cut the process off while its hung sibling was still pending.
+      expect(harness.events.some(event => event.kind === 'root-disposed')).toBe(true)
+    } finally {
+      await abandon(harness, storageDir)
     }
   })
 })
