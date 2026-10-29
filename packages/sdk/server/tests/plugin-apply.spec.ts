@@ -12,6 +12,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { exitOnStdinEnd, internals, provideCmdline, type AppReady } from '@deepseek-ai/dsh-cmdline'
 import { createLaunchEnvironmentSnapshot, DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import * as jsonrpc from '../src/index.ts'
@@ -76,7 +77,9 @@ async function mountPlugin(
     writeDelayMs?: number
     failFlush?: boolean
     eofExitGraceMs?: number
-    beforeServer?: (ctx: Context) => Promise<void> | void
+    beforeServer?: (ctx: Context, input: PassThrough) => Promise<void> | void
+    /** Dual-path exit override: the shared first-write-wins death point. */
+    exit?: (code: number) => void
   } = {},
 ): Promise<ApplyHarness> {
   const ctx = new Context()
@@ -84,9 +87,11 @@ async function mountPlugin(
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(JsonlSessionPersistence, { root: storageDir })
   await new Promise(resolve => setTimeout(resolve, 50))
-  await options.beforeServer?.(ctx)
 
   const input = new PassThrough()
+  // beforeServer may bind the cmdline controller road to this very stream, so
+  // both EOF listeners (cmdline + plugin) observe one end() the same frame.
+  await options.beforeServer?.(ctx, input)
   const events: WireEvent[] = []
   const outputErrors: Error[] = []
   let pendingOutput = ''
@@ -120,7 +125,7 @@ async function mountPlugin(
     },
   })
   output.on('error', (error: Error) => { outputErrors.push(error) })
-  const exit = (code: number): void => { events.push({ kind: 'exit', code }) }
+  const exit = options.exit ?? ((code: number): void => { events.push({ kind: 'exit', code }) })
 
   ctx.effect(() => () => { events.push({ kind: 'root-disposed' }) }, 'jsonrpc test root-disposal witness')
   const fiber = await ctx.plugin(jsonrpc, {
@@ -673,6 +678,29 @@ describe('dsh-sdk-jsonrpc-server EOF bounded self-exit', () => {
     }
   })
 
+  it('joins an external disposal that lands after the self-exit has started', async () => {
+    // Dual exit intent (K4 §8 ruling): the cmdline controller path
+    // (exitOnStdinEnd) may dispose the root concurrently with the plugin's
+    // grace self-exit. Both roads land on the same root fiber (cordis dispose
+    // is idempotent) and exit(0) is first-write-wins, so the observable
+    // converges to exactly one dispose and one exit.
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-join-'))
+    const harness = await mountPlugin(storageDir, { eofExitGraceMs: 60 })
+    try {
+      harness.input.end()
+      // Let the self-exit start (timer fires, the exit task begins its flush),
+      // then land the external disposal on top of the in-flight one.
+      await new Promise(resolve => setTimeout(resolve, 120))
+      await harness.dispose()
+      await settle()
+      expect(harness.exits()).toEqual([0])
+      expect(harness.events.filter(event => event.kind === 'root-disposed')).toHaveLength(1)
+    } finally {
+      await harness.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
   it('resolves the production stdin shape to the five-second default', async () => {
     // No input override: resolution must fall through to the default grace.
     // It arms only on a real EOF, which the worker's idle stdin never produces.
@@ -753,6 +781,155 @@ describe('dsh-sdk-jsonrpc-server EOF bounded self-exit', () => {
       // The dispose stage did start (its synchronous witness ran); the deadline
       // cut the process off while its hung sibling was still pending.
       expect(harness.events.some(event => event.kind === 'root-disposed')).toBe(true)
+    } finally {
+      await abandon(harness, storageDir)
+    }
+  })
+})
+
+/** Committed startup readiness: the EOF under test always lands post-startup. */
+const committedAppReady: AppReady = {
+  onReady(listener) {
+    listener()
+    return () => {}
+  },
+}
+
+/**
+ * Count process-level failures for one test body: the dual-path convergence
+ * must never surface an unhandled rejection or an uncaught exception, even
+ * with both roads disposing the root concurrently.
+ */
+async function withoutUnhandledFailures(run: () => Promise<void>): Promise<void> {
+  const failures: unknown[] = []
+  const onRejection = (reason: unknown): void => { failures.push(reason) }
+  const onException = (error: unknown): void => { failures.push(error) }
+  process.on('unhandledRejection', onRejection)
+  process.on('uncaughtException', onException)
+  try {
+    await run()
+  } finally {
+    process.off('unhandledRejection', onRejection)
+    process.off('uncaughtException', onException)
+  }
+  expect(failures).toEqual([])
+}
+
+/**
+ * Mount the production cmdline controller road beside the plugin: the real
+ * `exitOnStdinEnd` primitive (stdin EOF → AppReady gate → `appExit(0)`) with
+ * the launcher's exit semantics inlined — apps/cli `profile-boot.ts` wires
+ * appExit to `createProcessShutdown` around the root-fiber dispose: one
+ * single-flight disposal, a bounded force-exit timer
+ * (PROCESS_SHUTDOWN_TIMEOUT_MS = 5000) that fires even when disposal hangs,
+ * then the shared exit point. The roads share only the root fiber (cordis
+ * dispose is single-shot idempotent) and the first-write-wins process exit;
+ * the plugin's `exitTask` single-flight stays strictly its own road — the K4
+ * §8 dual-path topology, verbatim.
+ */
+function mountControllerRoad(
+  ctx: Context,
+  input: PassThrough,
+  sharedExit: (code: number) => void,
+): void {
+  let disposal: Promise<void> | undefined
+  let forceTimer: ReturnType<typeof setTimeout> | undefined
+  const previousStdin = internals.stdin
+  internals.stdin = input
+  try {
+    provideCmdline(ctx, {
+      args: ['--profile', 'sdk'],
+      exit: (code) => {
+        // process-shutdown `shutdown(0)`: arm the bounded force timer, start
+        // the single-flight root disposal, and land on the shared exit point
+        // whichever settles first.
+        forceTimer = setTimeout(() => sharedExit(code), 5000)
+        disposal ??= ctx.fiber.dispose().catch(() => { /* teardown failures own no exit code here */ })
+        void disposal.then(
+          () => { clearTimeout(forceTimer); sharedExit(code) },
+          () => { clearTimeout(forceTimer); sharedExit(code) },
+        )
+      },
+      ready: committedAppReady,
+    })
+    exitOnStdinEnd(ctx, 'sdk-app.stdin')
+  } finally {
+    internals.stdin = previousStdin
+  }
+}
+
+describe('dsh-sdk-jsonrpc-server EOF dual-path concurrency (K4 §8: cmdline controller × plugin self-exit)', () => {
+  it('converges a same-frame EOF on both exit roads into one exit, one dispose, and zero unhandled failures', async () => {
+    // Production sdk bundles mount both roads on one tree: sdk-app-startup
+    // binds exitOnStdinEnd (controller, no grace) while sdk-jsonrpc-server
+    // arms its own grace self-exit. One end() lands in both listeners the
+    // same frame; the controller's exit intent wins, its dispose tears the
+    // tree down (cancelling the armed grace timer or absorbing the joined
+    // self-exit), and the observable converges to one exit and one dispose.
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-dual-'))
+    const sharedExits: number[] = []
+    const sharedExit = (code: number): void => {
+      // First write wins: the process dies once, whatever raced.
+      if (sharedExits.length === 0) sharedExits.push(code)
+    }
+    const harness = await mountPlugin(storageDir, {
+      eofExitGraceMs: 60,
+      exit: sharedExit,
+      beforeServer: (ctx, input) => { mountControllerRoad(ctx, input, sharedExit) },
+    })
+    try {
+      await withoutUnhandledFailures(async () => {
+        harness.input.end()
+        await waitFor(() => sharedExits.length > 0 ? true : undefined, 'controller-road exit intent')
+        // Cross the plugin grace deadline: a still-armed self-exit must have
+        // joined (or been cancelled), never re-exited.
+        await new Promise(resolve => setTimeout(resolve, 150))
+        await settle()
+        expect(sharedExits).toEqual([0])
+        expect(harness.events.filter(event => event.kind === 'root-disposed')).toHaveLength(1)
+      })
+    } finally {
+      await harness.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
+  it('forces the exit when both dual-path disposals hang — the lock still dies with the process', { timeout: 15_000 }, async () => {
+    // Worst case: every road joins one wedged root disposal. The controller's
+    // 5s bounded force timer fires first, the plugin's 10s deadline backs it
+    // up, and exactly one exit lands — an orphaned kernel's flock dies with
+    // the process regardless of dispose correctness (K4 §3.2).
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-eof-dual-hang-'))
+    const sharedExits: number[] = []
+    const sharedExit = (code: number): void => {
+      if (sharedExits.length === 0) sharedExits.push(code)
+    }
+    const harness = await mountPlugin(storageDir, {
+      eofExitGraceMs: 30,
+      exit: sharedExit,
+      beforeServer: (ctx, input) => {
+        ctx.effect(() => () => new Promise<void>(() => { /* deliberately hung disposal */ }), 'hung root disposal witness')
+        mountControllerRoad(ctx, input, sharedExit)
+      },
+    })
+    try {
+      await withoutUnhandledFailures(async () => {
+        harness.input.end()
+        const startedAt = Date.now()
+        const deadline = startedAt + 14_000
+        while (sharedExits.length === 0 && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 25))
+        }
+        expect(sharedExits.length).toBeGreaterThan(0)
+        // Only the controller's 5s bounded force timer explains an exit this
+        // late: neither road's dispose settled on its own.
+        expect(Date.now() - startedAt).toBeGreaterThanOrEqual(4500)
+        expect(sharedExits).toEqual([0])
+        // The dispose stage genuinely started (its witnesses ran) and was cut.
+        expect(harness.events.some(event => event.kind === 'root-disposed')).toBe(true)
+        await settle()
+        expect(sharedExits).toEqual([0])
+      })
     } finally {
       await abandon(harness, storageDir)
     }
