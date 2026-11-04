@@ -4,6 +4,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolExecution } from '@deepseek-ai/dsh-tools'
+import { fillQuestionIds } from './ids.ts'
 import { TIMED_WAIT_PARAMETER } from '@deepseek-ai/dsh-user-questions'
 import type {
   AskUserQuestionAnswer, AskUserQuestionRequestEvent,
@@ -115,7 +116,10 @@ export function registerTimedAskUser(ctx: Context, timeout = 120): void {
           type: 'object',
           additionalProperties: true,
           properties: {
-            id: { type: 'string', required: true, description: 'Stable id for this question; echoed in the answer.' },
+            id: {
+              type: 'string',
+              description: 'Optional stable id for this question (auto-filled q1, q2, … when omitted); echoed in the answer.',
+            },
             question: { type: 'string', required: true, description: 'The specific question to ask the user.' },
             header: {
               type: 'string',
@@ -190,8 +194,9 @@ export function registerTimedAskUser(ctx: Context, timeout = 120): void {
     },
     async execute(args, exec) {
       const timeout = validateTimeout(args.timeout ?? defaultTimeout)
-      validateQuestionIds(args.questions)
-      const request = questionRequest(args.questions, exec)
+      const questions = fillQuestionIds(args.questions)
+      validateQuestionIds(questions)
+      const request = questionRequest(questions, exec)
       if (timeout !== -1) {
         if (exec.agent === undefined) throw new Error('timed questions require a live agent')
         const result = await ctx.userQuestions.askTimed({ ...request, agent: exec.agent }, exec.callId, timeout * 1000)
