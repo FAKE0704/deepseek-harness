@@ -678,4 +678,93 @@ describe('ask_user_question tool', () => {
 
     expect(ctx.tools.get('ask_user_question')).toBeUndefined()
   })
+
+  it('auto-fills omitted question ids instead of failing the call', async () => {
+    const ctx = await setup()
+    const seen: AskUserQuestionRequest[] = []
+    registerQuestionAnswerer(ctx, {
+      async ask(request) {
+        seen.push(request)
+        return { answers: [{ id: 'q1', selected: ['yes'] }, { id: 'q2', selected: ['no'] }] }
+      },
+    })
+
+    const result = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: ToolCallId('ask-no-id'),
+      name: 'ask_user_question',
+      arguments: { questions: [{ question: 'Continue?' }, { question: 'Proceed?' }] },
+    })
+
+    expect(result.isError).toBe(false)
+    expect(seen[0]?.questions.map(question => question.id)).toEqual(['q1', 'q2'])
+    // The answer batch echoes the derived ids, so the model can still map it
+    // back onto its own question order.
+    expect(result).toMatchObject({ isError: false })
+    if (result.isError) throw new Error('expected ask_user_question success')
+    expect(result.value).toEqual({ answers: [{ id: 'q1', selected: ['yes'] }, { id: 'q2', selected: ['no'] }] })
+  })
+
+  it('auto-fills around supplied ids without colliding (mixed batch, blank id)', async () => {
+    const ctx = await setup()
+    const seen: AskUserQuestionRequest[] = []
+    registerQuestionAnswerer(ctx, {
+      async ask(request) {
+        seen.push(request)
+        return { answers: [{ id: 'q1_2', selected: [] }] }
+      },
+    })
+
+    await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: ToolCallId('ask-mixed-id'),
+      name: 'ask_user_question',
+      arguments: {
+        questions: [
+          { question: 'First?' },
+          { id: 'q1', question: 'Second?' },
+          { id: '  ', question: 'Third?' },
+        ],
+      },
+    })
+
+    // Position 1 cannot take q1 (supplied later in the batch), so it falls back
+    // to q1_2; the blank third id keeps the free positional q3 candidate.
+    expect(seen[0]?.questions.map(question => question.id)).toEqual(['q1_2', 'q1', 'q3'])
+  })
+
+  it('no longer requires a question id in the model-facing schema', async () => {
+    const ctx = await setup()
+    const schema = ctx.tools.schemas().find(tool => tool.name === 'ask_user_question')
+    const items = (schema?.parameters as unknown as {
+      properties: { questions: { items: { required?: readonly string[] } } }
+    }).properties.questions.items
+
+    expect(items.required ?? []).toEqual(['question'])
+    expect(JSON.stringify(schema)).toContain('auto-filled q1, q2')
+  })
+
+  it('auto-fills omitted ids in the timed tool as well', async () => {
+    const ctx = await setup({ mode: 'timed', timeout: -1 })
+    const seen: AskUserQuestionRequest[] = []
+    registerQuestionAnswerer(ctx, {
+      async ask(request) {
+        seen.push(request)
+        return { answers: [{ id: 'q1', selected: ['yes'] }] }
+      },
+    })
+    const agent = stubAgent('timed-no-id')
+    ctx.agents.enter(agent, undefined)
+
+    const result = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: ToolCallId('timed-no-id-call'),
+      name: 'ask_user_question',
+      arguments: { questions: [{ question: 'Continue?' }] },
+      agent,
+    })
+
+    expect(result.isError).toBe(false)
+    expect(seen[0]?.questions.map(question => question.id)).toEqual(['q1'])
+  })
 })

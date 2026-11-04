@@ -9,6 +9,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
+import { fillQuestionIds } from './ids.ts'
 import { registerTimedAskUser } from './timed.ts'
 import '@deepseek-ai/dsh-user-questions'
 
@@ -47,7 +48,10 @@ export function apply(ctx: Context, config: Config = {}): void {
           type: 'object',
           additionalProperties: true,
           properties: {
-            id: { type: 'string', required: true, description: 'Stable id for this question; echoed in the answer.' },
+            id: {
+              type: 'string',
+              description: 'Optional stable id for this question (auto-filled q1, q2, … when omitted); echoed in the answer.',
+            },
             question: { type: 'string', required: true, description: 'The specific question to ask the user.' },
             header: {
               type: 'string',
@@ -96,8 +100,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
     async execute(args, exec) {
+      const questions = fillQuestionIds(args.questions)
       const result = await ctx.userQuestions.ask({
-        questions: args.questions.map(question => ({
+        questions: questions.map(question => ({
           id: question.id,
           question: question.question,
           ...question.header !== undefined ? { header: question.header } : {},
