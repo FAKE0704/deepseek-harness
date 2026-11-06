@@ -88,6 +88,14 @@ function harnessApiKeyAuth(name: string): ApiKeyAuth {
 export interface ProviderSpec {
   /** Provider route key; also the `Models` collection key and each model's `provider`. */
   provider: string
+  /**
+   * Installed-catalog identity for a route whose key names no catalog
+   * provider: construction looks the catalog up under this name instead of the
+   * route key, so an aliased route reuses the catalog provider (its stream
+   * implementations and auth) exactly as a catalog-named route does. Absent
+   * keeps the historical lookup — the route key itself.
+   */
+  catalogProvider?: string
   /** Display name for selectors and status labels. */
   displayName: string
   /** Wire protocol override; absent means each model keeps its catalog protocol. */
@@ -165,7 +173,10 @@ function reuseCatalogProvider(base: Provider, spec: ProviderSpec): Provider {
  * @throws Error when the route names a wire protocol this build cannot serve.
  */
 export function buildProvider(spec: ProviderSpec): Provider {
-  const catalog = catalogProvider(spec.provider)
+  // An aliased route looks its catalog up under the declared identity, not its
+  // own key: the reuse branch below is what keeps vendor-specific API
+  // implementations and auth for a route the catalog would otherwise not ship.
+  const catalog = catalogProvider(spec.catalogProvider ?? spec.provider)
   // A catalog route keeping its catalog protocol reuses the catalog provider;
   // an explicit protocol means the deployment is repointing the route at a
   // different wire format, which only the protocol table can serve.

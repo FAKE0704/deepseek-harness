@@ -95,6 +95,17 @@ export interface PiAiProviderProfile {
   /** Name shown by configuration surfaces; defaults to the route key. */
   displayName?: string
   /**
+   * Installed-catalog identity for a route whose key names no catalog
+   * provider (a second account on one vendor, a purpose-named route):
+   * defaults — endpoint, protocol fallback, and every model entry with its
+   * compat — come from the named catalog provider while the route keeps its
+   * own key and credential. Refused when the name ships no catalog. Absent
+   * keeps the historical behavior: a route key that names an installed
+   * provider inherits its entry, and any other key is a fully hand-declared
+   * route.
+   */
+  catalogProvider?: string
+  /**
    * Wire protocol every model on this route speaks. Omission keeps each
    * installed catalog model's own protocol, which is why a catalog route needs
    * no protocol at all; a route the catalog does not ship must name one.
@@ -326,6 +337,7 @@ const modelOverride: z<PiAiModelOverride> = z.object(modelFields)
 const profile = z.object({
   apiKeyEnv: z.string().role('credential-ref'),
   displayName: z.string(),
+  catalogProvider: z.string(),
   api: z.union(supportedProtocols()),
   baseURL: z.string(),
   models: z.array(modelProfile),
@@ -422,6 +434,9 @@ export function resolveProfiles(
     if (source.baseURL !== undefined && source.baseURL.length === 0) {
       throw new Error(`llm-pi-ai: provider "${provider}" has an empty baseURL`)
     }
+    if (source.catalogProvider !== undefined && source.catalogProvider.length === 0) {
+      throw new Error(`llm-pi-ai: provider "${provider}" has an empty catalogProvider`)
+    }
     if (source.displayName !== undefined && source.displayName.length === 0) {
       throw new Error(`llm-pi-ai: provider "${provider}" has an empty displayName`)
     }
@@ -465,6 +480,7 @@ export function resolveProfiles(
     try {
       catalog = resolveRouteModels({
         provider,
+        ...source.catalogProvider === undefined ? {} : { catalogProvider: source.catalogProvider },
         ...source.api === undefined ? {} : { api: source.api },
         ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
         ...source.models === undefined ? {} : { models: source.models },
@@ -477,6 +493,7 @@ export function resolveProfiles(
       catalogError = catalog.modelErrors.values().next().value
       piProvider = buildProvider({
         provider,
+        ...source.catalogProvider === undefined ? {} : { catalogProvider: source.catalogProvider },
         displayName,
         ...source.api === undefined ? {} : { api: source.api },
         ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
