@@ -635,6 +635,14 @@ export type PiAiModelOverride = Omit<PiAiModelProfile, 'id'>
 export interface RouteCatalogRequest {
   /** Provider route key, stamped onto every materialized model. */
   provider: string
+  /**
+   * Installed-catalog identity for a route whose key names no catalog
+   * provider: defaults — endpoint, protocol fallback, and every model entry
+   * with its compat — resolve from the named provider's catalog entry while
+   * the route keeps its own key and credential. Refused when the name ships
+   * no catalog. Absent keeps the historical lookup — the route key itself.
+   */
+  catalogProvider?: string
   /** Wire protocol override; absent defers to each catalog model's own API. */
   api?: string
   /** Endpoint override; absent defers to the catalog model, then the catalog provider. */
@@ -843,8 +851,18 @@ export function resolveRouteModels(
   validation: 'strict' | 'deferred' = 'strict',
 ): RouteCatalog {
   const { provider } = request
-  const defaults = catalogModels(provider)
-  const providerBaseUrl = catalogProvider(provider)?.baseUrl
+  // An aliased route resolves every catalog default under the declared
+  // identity while keeping its own key: the alias is what carries vendor
+  // compat (installed entries, withheld fields included) to a route the
+  // catalog does not describe by key — a second account on one vendor, a
+  // purpose-named route.
+  const catalogId = request.catalogProvider ?? provider
+  if (request.catalogProvider !== undefined && !catalogProviders().has(request.catalogProvider)) {
+    invalid(provider, `names catalogProvider "${request.catalogProvider}", which the installed catalog does not ship;`
+      + ' drop the alias and declare the route, or point it at a provider pi-ai ships')
+  }
+  const defaults = catalogModels(catalogId)
+  const providerBaseUrl = catalogProvider(catalogId)?.baseUrl
   // An absent `models` key and an empty one are the same request: the config
   // schema materializes `[]` for the absent case, and an empty catalog could
   // serve no request anyway, so both mean "serve the installed catalog".
