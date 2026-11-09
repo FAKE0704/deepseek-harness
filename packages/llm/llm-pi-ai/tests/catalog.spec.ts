@@ -1252,3 +1252,58 @@ describe('configurable-provider directory', () => {
     })
   })
 })
+
+describe('declared catalog routes', () => {
+  it('resolves a route against the catalog id it declares, not its route key', async () => {
+    const server = await mockServer([])
+    const ctx = await harness({
+      providers: { 'zai-main': { apiKeyEnv: KEY_ENV, catalog: 'zai', baseURL: server.url } },
+    })
+
+    const zaiIds = getBuiltinModels('zai').map(model => model.id).sort()
+    const firstId = zaiIds[0]
+    if (firstId === undefined) throw new Error('the installed catalog ships no zai model')
+    expect(zaiIds.length).toBeGreaterThan(0)
+    expect((await ctx.llm.listModels('zai-main')).map(model => model.id).sort()).toEqual(zaiIds)
+    // Models still belong to the route key, not to the catalog vendor id.
+    const resolved = resolveProfiles({ 'zai-main': { catalog: 'zai', models: [{ id: firstId }] } }, 'deferred').get('zai-main')!
+    expect(resolved.piProvider?.getModels().every(model => model.provider === 'zai-main')).toBe(true)
+  })
+
+  it('lets two routes share one catalog vendor with independent keys', async () => {
+    const server = await mockServer([])
+    const ctx = await harness({
+      providers: {
+        'zai-main': { apiKeyEnv: KEY_ENV, catalog: 'zai', baseURL: server.url },
+        'zai-spare': { apiKeyEnv: KEY_ENV, catalog: 'zai', baseURL: server.url },
+      },
+    })
+
+    const zaiIds = getBuiltinModels('zai').map(model => model.id).sort()
+    expect((await ctx.llm.listModels('zai-main')).map(model => model.id).sort()).toEqual(zaiIds)
+    expect((await ctx.llm.listModels('zai-spare')).map(model => model.id).sort()).toEqual(zaiIds)
+    // Each route is its own provider entry with its own credential reference.
+    const providers = ctx.llm.listProviders().map(info => info.id)
+    expect(providers).toContain('zai-main')
+    expect(providers).toContain('zai-spare')
+  })
+
+  it('resolves a route key that names a catalog provider without a declaration', () => {
+    const firstModel = getBuiltinModels('zai')[0]
+    if (firstModel === undefined) throw new Error('the installed catalog ships no zai model')
+    const resolved = resolveProfiles({ zai: { models: [{ id: firstModel.id }] } }, 'deferred').get('zai')!
+    expect(resolved.catalogError).toBeUndefined()
+    expect(resolved.piProvider?.getModels().map(model => model.id))
+      .toEqual([firstModel.id])
+  })
+
+  it('refuses a declaration the installed catalog does not ship', () => {
+    expect(() => resolveProfiles({
+      'zai-main': { catalog: 'zai-mistyped' },
+    })).toThrow(/declares catalog "zai-mistyped", which the installed pi-ai catalog does not ship/)
+    // Stored reads keep the diagnostic instead of silently falling back.
+    const resolved = resolveProfiles({ 'zai-main': { catalog: 'zai-mistyped' } }, 'deferred').get('zai-main')!
+    expect(resolved.catalogError).toContain('zai-mistyped')
+    expect(resolved.piProvider).toBeUndefined()
+  })
+})

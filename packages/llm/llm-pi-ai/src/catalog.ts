@@ -178,8 +178,9 @@ function catalogProviders(): Map<string, Provider> {
 
 /**
  * The installed catalog provider for one route, when pi-ai ships one.
- * @param provider - provider route key.
- * @returns the catalog provider, or `undefined` for a route pi-ai does not ship.
+ * @param provider - provider route key, or a route's explicitly declared
+ *   catalog id.
+ * @returns the catalog provider, or `undefined` for an id pi-ai does not ship.
  */
 export function catalogProvider(provider: string): Provider | undefined {
   return catalogProviders().get(provider)
@@ -635,6 +636,13 @@ export type PiAiModelOverride = Omit<PiAiModelProfile, 'id'>
 export interface RouteCatalogRequest {
   /** Provider route key, stamped onto every materialized model. */
   provider: string
+  /**
+   * The installed catalog provider this route belongs to, when it declares
+   * one by id rather than by naming that id as the route key. Absent means
+   * the route key itself is the lookup, which is the historical and still
+   * default resolution.
+   */
+  catalog?: string
   /** Wire protocol override; absent defers to each catalog model's own API. */
   api?: string
   /** Endpoint override; absent defers to the catalog model, then the catalog provider. */
@@ -830,6 +838,24 @@ export interface RouteCatalog {
 }
 
 /**
+ * The catalog id one route resolves against: the route's explicit declaration
+ * when it names one, the route key itself otherwise. A declaration pi-ai does
+ * not ship is refused rather than silently ignored — falling back to the route
+ * key would turn a typo'd declaration into a hand-declared route with none of
+ * the catalog entry the author meant to inherit.
+ * @param request - the route-level catalog facts.
+ * @returns the id the installed catalog is read under.
+ */
+function resolveCatalogId(request: RouteCatalogRequest): string {
+  if (request.catalog === undefined) return request.provider
+  if (!catalogProviders().has(request.catalog)) {
+    invalid(request.provider, `declares catalog "${request.catalog}", which the installed pi-ai catalog does not`
+      + ` ship; the catalog providers are ${catalogProviderIds().join(', ')}`)
+  }
+  return request.catalog
+}
+
+/**
  * Materialize one route's catalog by merging the installed catalog defaults
  * under the configured entries. A route with no configured `models` serves the
  * installed catalog unchanged, which is what keeps an existing
@@ -843,8 +869,9 @@ export function resolveRouteModels(
   validation: 'strict' | 'deferred' = 'strict',
 ): RouteCatalog {
   const { provider } = request
-  const defaults = catalogModels(provider)
-  const providerBaseUrl = catalogProvider(provider)?.baseUrl
+  const catalogId = resolveCatalogId(request)
+  const defaults = catalogModels(catalogId)
+  const providerBaseUrl = catalogProvider(catalogId)?.baseUrl
   // An absent `models` key and an empty one are the same request: the config
   // schema materializes `[]` for the absent case, and an empty catalog could
   // serve no request anyway, so both mean "serve the installed catalog".

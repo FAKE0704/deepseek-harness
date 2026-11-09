@@ -88,6 +88,8 @@ function harnessApiKeyAuth(name: string): ApiKeyAuth {
 export interface ProviderSpec {
   /** Provider route key; also the `Models` collection key and each model's `provider`. */
   provider: string
+  /** Declared catalog id this route resolves against; absent resolves by the route key itself. */
+  catalog?: string
   /** Display name for selectors and status labels. */
   displayName: string
   /** Wire protocol override; absent means each model keeps its catalog protocol. */
@@ -165,7 +167,10 @@ function reuseCatalogProvider(base: Provider, spec: ProviderSpec): Provider {
  * @throws Error when the route names a wire protocol this build cannot serve.
  */
 export function buildProvider(spec: ProviderSpec): Provider {
-  const catalog = catalogProvider(spec.provider)
+  // A declared catalog id wins over the route key: two routes may share one
+  // catalog vendor, and each must reuse (or fall back to) that vendor's own
+  // provider construction.
+  const catalog = catalogProvider(spec.catalog ?? spec.provider)
   // A catalog route keeping its catalog protocol reuses the catalog provider;
   // an explicit protocol means the deployment is repointing the route at a
   // different wire format, which only the protocol table can serve.

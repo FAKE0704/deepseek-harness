@@ -92,6 +92,17 @@ export type {
 export interface PiAiProviderProfile {
   /** Credential reference (environment-variable name) resolved per request through `ctx.credentials`. */
   apiKeyEnv?: string
+  /**
+   * The installed pi-ai catalog provider this route belongs to, declared by
+   * id instead of naming that id as the route key — which is how two routes
+   * can share one catalog vendor (two accounts of the same provider) without
+   * colliding on the route key. Absent resolves the catalog by the route key
+   * itself, the historical and still default behavior. Every catalog-derived
+   * fact — model list, compat entry, endpoint — follows the declared id, while
+   * `apiKeyEnv` and the rest of this profile stay the route's own. A value
+   * pi-ai does not ship is refused, not silently ignored.
+   */
+  catalog?: string
   /** Name shown by configuration surfaces; defaults to the route key. */
   displayName?: string
   /**
@@ -191,6 +202,8 @@ export interface ResolvedPiAiProviderProfile
   displayName: string
   /** Validated credential reference, when one is configured. */
   apiKeyEnv?: CredentialRef
+  /** The installed catalog provider this route declares itself part of, when named explicitly. */
+  catalog?: string
   /** Positive finite provider-idle interval after defaulting. */
   streamIdleTimeoutMs: number
   /** Positive request-level base64 image payload bound after defaulting. */
@@ -325,6 +338,8 @@ const modelOverride: z<PiAiModelOverride> = z.object(modelFields)
 
 const profile = z.object({
   apiKeyEnv: z.string().role('credential-ref'),
+  /** Installed catalog provider this route belongs to; defaults to the route key itself. */
+  catalog: z.string(),
   displayName: z.string(),
   api: z.union(supportedProtocols()),
   baseURL: z.string(),
@@ -465,6 +480,7 @@ export function resolveProfiles(
     try {
       catalog = resolveRouteModels({
         provider,
+        ...source.catalog === undefined ? {} : { catalog: source.catalog },
         ...source.api === undefined ? {} : { api: source.api },
         ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
         ...source.models === undefined ? {} : { models: source.models },
@@ -478,6 +494,7 @@ export function resolveProfiles(
       piProvider = buildProvider({
         provider,
         displayName,
+        ...source.catalog === undefined ? {} : { catalog: source.catalog },
         ...source.api === undefined ? {} : { api: source.api },
         ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
         models: catalog.models,
