@@ -437,6 +437,25 @@ class SystemdScopeOwner implements BoundProcessOwner {
   }
 }
 
+/**
+ * Memory guard rails applied to every dsh-launched scope (K6). MemoryHigh
+ * throttles allocations and warns before the cap; MemoryMax kills the scope's
+ * processes when exceeded, so one runaway build cannot exhaust host RAM plus
+ * swap and wedge the whole machine (2026-11-09 outage: a single unbounded
+ * scope peaked at 6.7G RSS + 4.6G swap on a 7.8G host).
+ *
+ * MemorySwapMax is required for the cap to be real: cgroup v2 memory.max
+ * bounds only the RAM-side accounting, and reclaim satisfies it by swapping
+ * pages out. On a host with free swap a runaway allocation crawls under the
+ * limit while swap silently absorbs everything (verified 2026-11-11: a 4G
+ * touch-every-page payload completed without a single oom event under
+ * MemoryMax=3G alone). Capping swap forces reclaim to run out of escape
+ * routes, so exceeding MemoryMax actually triggers the memcg OOM kill.
+ */
+const SCOPE_MEMORY_HIGH = '1536M'
+const SCOPE_MEMORY_MAX = '3G'
+const SCOPE_MEMORY_SWAP_MAX = '512M'
+
 function scopeArgs(unitBase: string, invocation: RunnerInvocation, argv: readonly string[]): string[] {
   return [
     '--user',
@@ -444,6 +463,9 @@ function scopeArgs(unitBase: string, invocation: RunnerInvocation, argv: readonl
     '--quiet',
     '--collect',
     '--expand-environment=no',
+    `--property=MemoryHigh=${SCOPE_MEMORY_HIGH}`,
+    `--property=MemoryMax=${SCOPE_MEMORY_MAX}`,
+    `--property=MemorySwapMax=${SCOPE_MEMORY_SWAP_MAX}`,
     `--unit=${unitBase}`,
     '--',
     ...invocation,

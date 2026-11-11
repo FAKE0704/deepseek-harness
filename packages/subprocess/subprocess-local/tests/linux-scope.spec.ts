@@ -243,6 +243,14 @@ describe('Linux native capability selection', () => {
 })
 
 describe('Linux scope establishment and quiescence', () => {
+  it('applies memory guard properties to the subprocess scope invocation', () => {
+    const { spawn } = launch(async () => missingUnit())
+    const args = spawn.mock.calls[0]![1] as string[]
+    expect(args).toContain('--property=MemoryHigh=1536M')
+    expect(args).toContain('--property=MemoryMax=3G')
+    expect(args).toContain('--property=MemorySwapMax=512M')
+  })
+
   it.each(['abort', 'terminate'] as const)('settles and cleans a managed handle after early %s', async (action) => {
     const { child, result, requestPath } = launch(async () => missingUnit())
     const processKill = vi.spyOn(process, 'kill')
@@ -980,6 +988,18 @@ describe('Linux PTY bootstrap reuse', () => {
     await expect(owner.waitForExit()).resolves.toBeUndefined()
     scope.cleanup()
     expect(existsSync(linuxLaunchFilesFromLocator(requestPath).directory)).toBe(false)
+  })
+
+  it('applies memory guard properties to the terminal scope invocation', () => {
+    const scope = prepareLinuxTerminalScope(terminalSpec, { TARGET: 'yes' }, {
+      systemdRun: '/bin/systemd-run',
+      systemctl: '/bin/systemctl',
+      runnerInvocation: ['/usr/bin/node', '/runner.js'],
+    })
+    expect(scope.args).toContain('--property=MemoryHigh=1536M')
+    expect(scope.args).toContain('--property=MemoryMax=3G')
+    expect(scope.args).toContain('--property=MemorySwapMax=512M')
+    scope.cleanup()
   })
 
   it('uses the same request/bootstrap, preserves argv, and cleans after owner settlement', async () => {
