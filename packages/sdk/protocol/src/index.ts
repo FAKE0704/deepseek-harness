@@ -26,6 +26,7 @@ export type {
   SessionStatusNotification,
   SessionStreamFrame,
   SessionStreamNotification,
+  SessionPromptMode,
   SessionPromptParams,
   SessionPromptResult,
   SubagentFinishedNotification,

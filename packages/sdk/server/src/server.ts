@@ -229,7 +229,11 @@ export class HarnessSdkJsonRpcServer {
 
   /**
    * Queue one identified prompt without assigning later activity to it.
-   * @param params - target session and user content.
+   * @param params - target session, user content, and the optional delivery
+   *   mode: `'steer'` splices the message into the next-step queue so an
+   *   active turn consumes it at its next step boundary (mirroring the
+   *   gateway `session/prompt` contract); any other value — including the
+   *   absent default — queues it for the next turn boundary.
    * @returns the durable message identity.
    */
   async prompt(params: SessionPromptParams): Promise<SessionPromptResult> {
@@ -247,7 +251,8 @@ export class HarnessSdkJsonRpcServer {
       content,
       source: { kind: 'user' },
     })
-    rec.handle.agent.followup(message)
+    if (params.mode === 'steer') rec.handle.agent.steer(message)
+    else rec.handle.agent.followup(message)
     return { messageId: message.id }
   }
 

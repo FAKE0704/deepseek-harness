@@ -347,6 +347,111 @@ describe('HarnessSdkJsonRpcServer', () => {
     expect(otherHandle.dispose).toHaveBeenCalledOnce()
   })
 
+  it('routes prompt delivery by mode: steer to next-step, default and unknown to followup', async () => {
+    const followup = vi.fn<Agent['followup']>()
+    const steer = vi.fn<Agent['steer']>()
+    const agent = ({
+      id: SessionId('routed'),
+      followup,
+      steer,
+    } satisfies Pick<Agent, 'id' | 'followup' | 'steer'>) as unknown as Agent
+    const handle = { agent, dispose: vi.fn(() => Promise.resolve()) }
+    const ctx = {
+      on: vi.fn(() => () => undefined),
+      agents: { create: vi.fn(async () => handle), get: () => agent },
+      get: () => undefined,
+    } as unknown as Context
+    const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+    // This isolated prompt test begins after the handshake boundary.
+    ;(server as unknown as { initialized: boolean }).initialized = true
+
+    await server.prompt({ sessionId: 'routed', contentBlocks: [{ type: 'text', text: 'a' }], mode: 'steer' })
+    await server.prompt({ sessionId: 'routed', contentBlocks: [{ type: 'text', text: 'b' }] })
+    await server.prompt({ sessionId: 'routed', contentBlocks: [{ type: 'text', text: 'c' }], mode: 'followup' })
+    // Wire compatibility: unknown mode values fall back to the turn-boundary default.
+    await server.prompt({ sessionId: 'routed', contentBlocks: [{ type: 'text', text: 'd' }], mode: 'later' as 'steer' })
+
+    expect(steer).toHaveBeenCalledTimes(1)
+    expect(steer.mock.calls[0]?.[0].content).toEqual([{ type: 'text', text: 'a' }])
+    expect(followup).toHaveBeenCalledTimes(3)
+    await server.shutdown()
+  })
+
+  it('consumes a steered prompt at the next step boundary of an active turn', { timeout: 15_000 }, async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-steer-'))
+    const requests: unknown[] = []
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const server = createServer((request: IncomingMessage, response: ServerResponse) => {
+      let body = ''
+      request.on('data', (chunk: Buffer) => { body += chunk.toString('utf8') })
+      request.on('end', () => {
+        const holdThenRespond = async (): Promise<void> => {
+          requests.push(JSON.parse(body))
+          // Hold the first completion open: the steer must land while the turn
+          // is mid-step, proving step-boundary (not turn-boundary) consumption.
+          if (requests.length === 1) await gate
+          response.writeHead(200, { 'content-type': 'text/event-stream' })
+          response.end(MESSAGES_RESPONSE)
+        }
+        void holdThenRespond()
+      })
+    })
+    servers.push(server)
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    if (address === null || typeof address === 'string') throw new Error('no port')
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubEnv('DEEPSEEK_BASE_URL', `http://127.0.0.1:${address.port}`)
+    const ctx = await makeHarness(storageDir)
+    try {
+      const transport = new FakeTransport()
+      const runtime = new HarnessSdkJsonRpcServer(ctx, transport)
+      await runtime.handleRequest('initialize', {
+        cwd: storageDir,
+        provider: 'deepseek-official',
+        model: 'dsagent-model',
+      })
+
+      await runtime.handleRequest('session/prompt', {
+        sessionId: 'steer-e2e',
+        contentBlocks: [{ type: 'text', text: 'start work' }],
+      })
+      await vi.waitFor(() => { expect(requests).toHaveLength(1) })
+      // Steer mid-step: the splice is durable before the held completion is released.
+      await runtime.handleRequest('session/prompt', {
+        sessionId: 'steer-e2e',
+        contentBlocks: [{ type: 'text', text: 'subagent finished: report ready' }],
+        mode: 'steer',
+      })
+      release()
+      await vi.waitFor(() => {
+        expect(transport.notifications.findLast(n => n.method === 'session.status'))
+          .toEqual({ method: 'session.status', params: { sessionId: 'steer-e2e', status: 'idle' } })
+      })
+
+      // Step-boundary consumption: the second LLM request of the SAME turn
+      // already carries the steered message.
+      expect(requests).toHaveLength(2)
+      const secondBody = requests[1] as { messages: { role: string }[] }
+      const users = secondBody.messages.filter(m => m.role === 'user')
+      expect(JSON.stringify(users.at(-1))).toContain('subagent finished')
+      // No duplicate injection: exactly two user/message events ever entered
+      // the session log (initial prompt + one steer).
+      const userMessages = transport.notifications
+        .filter(n => n.method === 'session.event')
+        .map(n => (n.params as { event?: { type?: string; data?: { message?: { content?: { type?: string; text?: string }[] } } } }).event)
+        .filter(e => e?.type === 'user/message')
+      expect(userMessages).toHaveLength(2)
+      expect(JSON.stringify(userMessages[1])).toContain('subagent finished')
+
+      await runtime.handleRequest('shutdown', undefined)
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
   it('admits inline SDK images before the user message enters the session', async () => {
     const followup = vi.fn<Agent['followup']>()
     const agent = ({ id: SessionId('image'), followup } satisfies Pick<Agent, 'id' | 'followup'>) as unknown as Agent

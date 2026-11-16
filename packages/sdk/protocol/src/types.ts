@@ -32,12 +32,22 @@ export interface InitializeResult {
   serverInfo: { name: string; version: string }
 }
 
+/** Delivery mode for one queued prompt, mirroring the gateway `session/prompt` contract. */
+export type SessionPromptMode = 'followup' | 'steer'
+
 /** One user turn on one SDK session. */
 export interface SessionPromptParams {
   /** The SDK-side session id; an unknown id lazily creates the agent+session pair. */
   sessionId: string
   /** The prompt content blocks, sent verbatim as the user message. */
   contentBlocks: SdkPromptContentBlock[]
+  /**
+   * Delivery target: `'followup'` (default) queues the message for the next
+   * turn boundary; `'steer'` splices it into the next-step queue so an active
+   * turn consumes it at its next step boundary. Unknown values fall back to
+   * the default, so hosts never lose a message across kernel generations.
+   */
+  mode?: SessionPromptMode
 }
 
 /** Inline raster input admitted into the runtime's durable attachment store. */

@@ -19,6 +19,7 @@ import {
   type InitializeParams,
   type InitializeResult,
   type SessionCompactResult,
+  type SessionPromptMode,
   type SessionPromptParams,
   type SdkPromptContentBlock,
 } from '@deepseek-ai/dsh-sdk-protocol'
@@ -295,10 +296,22 @@ export class HarnessClient {
    * Queue one prompt and return its durable inbox identity.
    * @param sessionId - target session; an unknown id creates it.
    * @param contentBlocks - the user message, sent verbatim.
+   * @param options - optional delivery mode: `'steer'` asks the runtime to
+   *   splice the message into the next-step queue (an active turn consumes it
+   *   at its next step boundary); the default queues it for the next turn
+   *   boundary. Older runtimes ignore the extra param and keep the default.
    * @returns the queued message id.
    */
-  async prompt(sessionId: string, contentBlocks: SdkPromptContentBlock[]): Promise<string> {
-    const params: SessionPromptParams = { sessionId, contentBlocks }
+  async prompt(
+    sessionId: string,
+    contentBlocks: SdkPromptContentBlock[],
+    options?: { mode?: SessionPromptMode },
+  ): Promise<string> {
+    const params: SessionPromptParams = {
+      sessionId,
+      contentBlocks,
+      ...(options?.mode === undefined ? {} : { mode: options.mode }),
+    }
     const result = await this.request('session/prompt', { ...params })
     if (!isRecord(result) || typeof result.messageId !== 'string') {
       throw new SdkProtocolError(`session/prompt returned no message id: ${JSON.stringify(result)}`)
