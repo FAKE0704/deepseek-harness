@@ -16,6 +16,11 @@ packages:
 
 overrides:
   'extract-zip>yauzl': '3.4.0'
+  # Single physical copy of the types-only micromark token vocabulary: the
+  # client markdown reader resolved 2.0.3 directly while mdast/gfm pulled 2.0.2,
+  # so every Extension value was nominally incompatible with itself and the
+  # host type build failed on packages/client/ui-primitives/src/markdown/parse.ts.
+  'micromark-util-types': '2.0.3'
   '@deepseek-ai/cosmokit': 'link:vendor/cosmokit'
   '@deepseek-ai/schemastery': 'link:vendor/schemastery'
 
