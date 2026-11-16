@@ -48,6 +48,13 @@ export interface JsonlHandleStorage {
   persistHeader(header: SessionHeader, inheritedEventCount: SessionLogOffset): Promise<void>
   /** Truncate a torn physical tail before the first new append lands. */
   truncateTornTail(header: SessionHeader, truncateTo: number): Promise<void>
+  /** Rewrite a decodable non-canonical artifact in the canonical frame layout before the first append lands. */
+  reframeCanonicalLog(
+    header: SessionHeader,
+    path: string,
+    events: readonly SessionEvent[],
+    inheritedEventCount: SessionLogOffset,
+  ): Promise<void>
   /** Resolve the current-generation artifact path, or `undefined` when absent. */
   resolveCurrentLog(id: SessionId, signal?: AbortSignal): Promise<string | undefined>
   /** Read and validate the stored log at `path`, including its established event aliasing state. */
@@ -70,6 +77,9 @@ export interface StorageHandleState {
   tornTruncateTo?: number | undefined
   /** Complete events recovered from the torn final frame; the first mutation rewrites them durably. */
   recoveredTail?: SessionEvent[] | undefined
+  /** The stored log's first frame carried more than its header record (decodable
+   *  out-of-band writer); the first mutation reframes that exact artifact canonically. */
+  reframe?: { readonly events: readonly SessionEvent[]; readonly path: string } | undefined
   /** Exact fork-inherited prefix length stored with the log; `0` when unseeded. */
   inheritedEventCount: SessionLogOffset
   /** The validated stored prefix from a write open, served to reads until the first append. */
@@ -321,19 +331,27 @@ export class JsonlSessionHandle implements SessionHandle {
     if (batch.length === 0) return
     await this.ensureLease()
     assertContiguous(this.id, batch, this.state.cursor)
-    // Commit any pending torn-tail repair first, clearing each step's state
-    // only once it lands so a failed step retries on the next mutation:
-    // truncate the torn bytes, then durably rewrite the complete events
-    // recovered from them (already counted in the primed cursor).
-    if (this.state.tornTruncateTo !== undefined) {
-      await this.storage.truncateTornTail(this.header, this.state.tornTruncateTo)
+    // Commit any pending physical repair first, clearing each step's state
+    // only once it lands so a failed step retries on the next mutation. A
+    // canonical reframe supersedes torn-tail surgery: the rewrite already
+    // carries the primed prefix, recovered tail included, in canonical frames.
+    const reframe = this.state.reframe
+    if (reframe !== undefined) {
+      await this.storage.reframeCanonicalLog(this.header, reframe.path, reframe.events, this.state.inheritedEventCount)
+      this.state.reframe = undefined
       this.state.tornTruncateTo = undefined
-    }
-    if (this.state.recoveredTail !== undefined) {
-      if (this.state.recoveredTail.length > 0) {
-        await this.storage.persistBatch(this.header, this.state.recoveredTail, this.state.materialized, this.state.inheritedEventCount)
-      }
       this.state.recoveredTail = undefined
+    } else {
+      if (this.state.tornTruncateTo !== undefined) {
+        await this.storage.truncateTornTail(this.header, this.state.tornTruncateTo)
+        this.state.tornTruncateTo = undefined
+      }
+      if (this.state.recoveredTail !== undefined) {
+        if (this.state.recoveredTail.length > 0) {
+          await this.storage.persistBatch(this.header, this.state.recoveredTail, this.state.materialized, this.state.inheritedEventCount)
+        }
+        this.state.recoveredTail = undefined
+      }
     }
     await this.storage.persistBatch(this.header, batch, this.state.materialized, this.state.inheritedEventCount)
     this.state.materialized = true

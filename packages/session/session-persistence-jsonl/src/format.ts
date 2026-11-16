@@ -536,3 +536,20 @@ export function scanLog(buffer: Buffer): SessionLogScan {
   scanner.write(buffer.subarray(headerEnd + 1))
   return scanner.finish()
 }
+
+/**
+ * Split one decoded first frame into its leading header record and any further
+ * plaintext packed into the same frame. Canonical writers publish exactly one
+ * header record per frame; decodable out-of-band artifacts may pack further
+ * records behind the header and must stay readable instead of bricking the
+ * session, so every reader splits the leading record off before scanning.
+ *
+ * @param plaintext - the decoded first-frame plaintext.
+ * @returns the newline-terminated header record and the trailing plaintext
+ *   (empty for canonical frames).
+ */
+export function splitZstdHeaderFrame(plaintext: Buffer): { headerRecord: Buffer; extraRecords: Buffer } {
+  const headerEnd = plaintext.indexOf(0x0A)
+  if (headerEnd === -1) throw new Error('corrupt Zstandard session log: first frame is not exactly one header line')
+  return { headerRecord: plaintext.subarray(0, headerEnd + 1), extraRecords: plaintext.subarray(headerEnd + 1) }
+}
