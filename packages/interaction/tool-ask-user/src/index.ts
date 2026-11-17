@@ -95,6 +95,10 @@ export function apply(ctx: Context, config: Config = {}): void {
               },
             },
           },
+          note: {
+            type: 'string',
+            description: 'Continuation guidance accompanying the answer batch.',
+          },
         },
       },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
@@ -118,6 +122,11 @@ export function apply(ctx: Context, config: Config = {}): void {
           selected: [...answer.selected],
           ...answer.custom !== undefined ? { custom: answer.custom } : {},
         })),
+        // Continue-as-a-value-field (same shape as the timed tool's `message`):
+        // without it the model frequently ends the turn right after reading the
+        // bare answer JSON, dropping follow-up actions it declared when asking.
+        note: 'Answer delivered in this tool result. Continue the task now: act on this answer in this same turn — '
+          + 'if you declared follow-up actions when asking, execute them now instead of just acknowledging.',
       }
     },
   }))

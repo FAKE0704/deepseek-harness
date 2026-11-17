@@ -16,6 +16,10 @@ import * as toolAskUser from '@deepseek-ai/dsh-tool-ask-user'
 
 const testToolSignal = new AbortController().signal
 
+/** The continuation note the legacy tool appends to a delivered answer batch. */
+const CONTINUE_NOTE = 'Answer delivered in this tool result. Continue the task now: act on this answer in this same turn — '
+  + 'if you declared follow-up actions when asking, execute them now instead of just acknowledging.'
+
 /** The `request/header` event that records the exact tool schemas the model saw. */
 function headerEvent(seq: number, tools: ToolSchema[]): SessionEvent {
   return {
@@ -234,7 +238,7 @@ describe('ask_user_question tool', () => {
     expect(result).toMatchObject({
       isError: false,
       value: { answers: [{ id: 'continue', selected: ['yes'] }] },
-      content: [{ type: 'text', text: '{"answers":[{"id":"continue","selected":["yes"]}]}' }],
+      content: [{ type: 'text', text: JSON.stringify({ answers: [{ id: 'continue', selected: ['yes'] }], note: CONTINUE_NOTE }) }],
     })
     // The legacy request stays unkeyed: its Client card has no tool call row to
     // reopen from, so closing that card still cancels the whole request.
@@ -270,7 +274,42 @@ describe('ask_user_question tool', () => {
     }])
     expect(detailed).toMatchObject({
       isError: false,
-      content: [{ type: 'text', text: '{"answers":[{"id":"pkg","selected":[],"custom":"bun"}]}' }],
+      content: [{ type: 'text', text: JSON.stringify({ answers: [{ id: 'pkg', selected: [], custom: 'bun' }], note: CONTINUE_NOTE }) }],
+    })
+  })
+
+  it('carries the continuation note on the legacy answer batch (continue-as-a-value-field)', async () => {
+    const ctx = await setup({ mode: 'legacy' })
+    registerQuestionAnswerer(ctx, {
+      async ask() {
+        return { answers: [{ id: 'continue', selected: ['yes'] }] }
+      },
+    })
+
+    const result = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: ToolCallId('ask-continue-note'),
+      name: 'ask_user_question',
+      arguments: { questions: [{ id: 'continue', question: 'Continue?' }] },
+    })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected ask_user_question success')
+    // Instruction as a value field (the timed tool's `message` precedent): the
+    // model must be told to keep working on the answer in this same turn instead
+    // of ending it right after reading the bare answer JSON.
+    expect(result.value).toMatchObject({
+      answers: [{ id: 'continue', selected: ['yes'] }],
+      note: CONTINUE_NOTE,
+    })
+    // The render stays one parseable JSON line: the Client question row and the
+    // `userQuestions` projection JSON.parse this recorded text, so a prose
+    // prefix would break both readers.
+    expect(result.content).toHaveLength(1)
+    const rendered = (result.content[0] as { type: string; text: string }).text
+    expect(() => JSON.parse(rendered)).not.toThrow()
+    expect(JSON.parse(rendered)).toEqual({
+      answers: [{ id: 'continue', selected: ['yes'] }],
+      note: CONTINUE_NOTE,
     })
   })
 
