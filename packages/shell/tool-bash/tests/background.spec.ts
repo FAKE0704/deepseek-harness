@@ -80,7 +80,6 @@ describe('background bash output', () => {
     const ctx = await setup()
     const ack = await call(ctx, {
       command: 'printf "line-1\\n"; sleep 0.4; printf "line-2\\n"',
-      description: 'test command',
       run_in_background: true,
     })
     expect(text(ack)).toContain('started background job')
@@ -105,7 +104,7 @@ describe('background bash output', () => {
 
   it('a killed background job settles killed with the kill reason merged into its detail', async () => {
     const ctx = await setup()
-    await call(ctx, { command: 'sleep 60', description: 'test command', run_in_background: true })
+    await call(ctx, { command: 'sleep 60', run_in_background: true })
     const jobs = ctx.jobs
     const job = jobs.list()[0]
     jobs.kill(job!.id, undefined, 'test cleanup')
@@ -117,7 +116,6 @@ describe('background bash output', () => {
     const ctx = await setup()
     const started = await call(ctx, {
       command: 'true',
-      description: 'test command',
       workdir: '/nonexistent-dsh',
       run_in_background: true,
     })
@@ -138,7 +136,6 @@ describe('background bash output', () => {
     const ctx = await setup()
     await call(ctx, {
       command: 'echo out-line; echo err-line 1>&2',
-      description: 'test command',
       run_in_background: true,
     })
     const jobs = ctx.jobs
@@ -211,7 +208,6 @@ describe('foreground commands as jobs', () => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
       const pending = call(ctx, {
         command: 'printf "early-output\\n"; sleep 30',
-        description: 'test command',
         timeoutMs: 250,
       })
       await until(() => execution?.observed.stdout.readFrom(0).text.includes('early-output') ? true : undefined, task.timeout)
@@ -246,7 +242,7 @@ describe('foreground commands as jobs', () => {
     const ctx = await setup()
     const seen: string[] = []
     ctx.jobs.events.subscribe({ owners: 'all' }, (event) => { seen.push(event.type === 'settled' ? `settled:${String(event.awaited)}` : event.type) })
-    const result = await call(ctx, { command: 'printf "done\\n"; printf "warn\\n" >&2', description: 'test command' })
+    const result = await call(ctx, { command: 'printf "done\\n"; printf "warn\\n" >&2' })
     expect(result.isError).toBe(false)
     if (result.isError) throw new Error('expected a foreground result')
     expect(result.value).toMatchObject({ kind: 'foreground', exitCode: 0, stdout: { text: 'done\n' }, stderr: { text: 'warn\n' } })
@@ -258,7 +254,7 @@ describe('foreground commands as jobs', () => {
 
   it('a foreground command stopped from outside the call reports the reason instead of failing', async ({ task }) => {
     const ctx = await setup()
-    const pending = call(ctx, { command: 'sleep 30', description: 'test command' })
+    const pending = call(ctx, { command: 'sleep 30' })
     const job = await until(() => ctx.jobs.list()[0], task.timeout)
     expect(ctx.jobs.kill(job.id, undefined, 'cancelled by the user')).toBe('requested')
     const result = await pending
@@ -272,7 +268,7 @@ describe('foreground commands as jobs', () => {
   it('a command whose start fails reports the failure as an error result and leaves no job behind', async () => {
     const ctx = await setup()
     vi.spyOn(ctx.shell, 'execute').mockRejectedValue(new Error('spawn bash ENOENT'))
-    const result = await call(ctx, { command: 'true', description: 'test command' })
+    const result = await call(ctx, { command: 'true' })
     expect(result.isError).toBe(true)
     expect(text(result)).toBe('Error: spawn bash ENOENT')
     expect(ctx.jobs.list()).toEqual([])
@@ -290,7 +286,7 @@ describe('foreground commands as jobs', () => {
       signal: controller.signal,
       callId: ToolCallId('background-call-aborted'),
       name: 'bash',
-      arguments: { command: 'sleep 30', description: 'test command' },
+      arguments: { command: 'sleep 30' },
     })
     await until(() => ctx.jobs.list()[0], task.timeout)
     controller.abort()
@@ -322,7 +318,7 @@ describe('foreground commands as jobs', () => {
       signal: controller.signal,
       callId: ToolCallId('background-call-aborted-slow-kill'),
       name: 'bash',
-      arguments: { command: 'sleep 30', description: 'test command', timeoutMs: 100 },
+      arguments: { command: 'sleep 30', timeoutMs: 100 },
     })
     const job = await until(() => ctx.jobs.list()[0])
     controller.abort()
@@ -339,7 +335,7 @@ describe('foreground commands as jobs', () => {
     vi.spyOn(ctx.shell, 'execute').mockImplementation(spec => new Promise((_resolve, reject) => {
       spec.signal?.addEventListener('abort', () => { reject(new Error('fixture preparation aborted')) }, { once: true })
     }))
-    const result = await call(ctx, { command: 'sleep 30', description: 'test command', timeoutMs: 250 })
+    const result = await call(ctx, { command: 'sleep 30', timeoutMs: 250 })
     expect(result.isError).toBe(false)
     if (result.isError) throw new Error('expected a foreground result')
     expect(result.value).toMatchObject({ kind: 'foreground', exitCode: null, signal: null, timedOut: true, aborted: false, timeoutMs: 250 })
@@ -372,7 +368,7 @@ describe('foreground commands as jobs', () => {
       signal: testToolSignal,
       callId: ToolCallId('background-promote-owned'),
       name: 'bash',
-      arguments: { command: 'printf "held\\n"; sleep 30', description: 'test command', timeoutMs: 250 },
+      arguments: { command: 'printf "held\\n"; sleep 30', timeoutMs: 250 },
       agent: owner,
     })
     expect(text(result)).toContain('moved to background job')
@@ -405,7 +401,6 @@ describe('foreground commands as jobs', () => {
     }
     const result = await call(ctx, {
       command: 'sleep 30',
-      description: 'test command',
       timeoutMs: 250,
     })
     const body = text(result)
@@ -430,7 +425,7 @@ describe('foreground commands as jobs', () => {
     await ctx.plugin(ToolBash, { promoteOnTimeout: false })
     const seen: string[] = []
     ctx.jobs.events.subscribe({ owners: 'all' }, (event) => { seen.push(event.type) })
-    const result = await call(ctx, { command: 'sleep 30', description: 'test command', timeoutMs: 250 })
+    const result = await call(ctx, { command: 'sleep 30', timeoutMs: 250 })
     expect(text(result)).toContain('[timed out after 250ms]')
     expect(ctx.jobs.list()).toEqual([])
     expect(seen).toEqual([])
@@ -487,7 +482,7 @@ describe('owned background output', () => {
       signal: testToolSignal,
       callId: ToolCallId('background-owned-1'),
       name: 'bash',
-      arguments: { command: 'echo owned', description: 'test command', run_in_background: true },
+      arguments: { command: 'echo owned', run_in_background: true },
       agent: owner,
     })
     const owned = ctx.jobs

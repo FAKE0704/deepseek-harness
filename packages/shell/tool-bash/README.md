@@ -52,7 +52,7 @@ The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-a
 
 ### Running a command
 
-The tool executes `bash -c <command>` and returns the combined output. Commands run in a fresh shell every call, so state never persists — pass `workdir` instead of `cd`. A non-zero exit is reported as `[exit code: N]` for the agent to interpret, not surfaced as a tool error. A `description` in active voice (5–10 words) labels the call in the UI; the schema lists it before `command` and asks the model to emit it first, without enforcing JSON member order. `timeoutMs` overrides the executor's default and cap. Output beyond the executor's stream caps is truncated to its tail, with the full output saved to a spill file whose path is reported. The description tells the agent to verify the resolved absolute target path before any delete or move and to guard variables in such paths with `${VAR:?}`.
+The tool executes `bash -c <command>` and returns the combined output. Commands run in a fresh shell every call, so state never persists — pass `workdir` instead of `cd`. A non-zero exit is reported as `[exit code: N]` for the agent to interpret, not surfaced as a tool error. `timeoutMs` overrides the executor's default and cap. Output beyond the executor's stream caps is truncated to its tail, with the full output saved to a spill file whose path is reported. The tool description tells the agent to verify the resolved absolute target path before any delete or move and to guard variables in such paths with `${VAR:?}`.
 
 <a id="running-long-commands-in-the-background"></a>
 ### Running long commands in the background
@@ -192,7 +192,7 @@ Append-only; newly visible content follows the reusable request prefix and does 
 
 #### What the model sees
 
-Validation and policy failures are normalized as `Error: <message>`. This package's stable messages are `invalid command: expected a non-empty string`, `invalid description: expected a non-empty string`, `invalid timeoutMs: expected a positive number, got <value>`, the escalation pairing failures, `run_in_background is disabled for this deployment (enableRunInBackground: false)`, `background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs`, `sandbox_permissions is not available in this composition (no sandboxing executor to escalate)`, the approval availability/rejection/cancellation variants, and `tool call aborted`.
+Validation and policy failures are normalized as `Error: <message>`. This package's stable messages are `invalid command: expected a non-empty string`, `invalid timeoutMs: expected a positive number, got <value>`, the escalation pairing failures, `run_in_background is disabled for this deployment (enableRunInBackground: false)`, `background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs`, `sandbox_permissions is not available in this composition (no sandboxing executor to escalate)`, the approval availability/rejection/cancellation variants, and `tool call aborted`.
 
 #### Token effect
 

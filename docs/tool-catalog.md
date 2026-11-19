@@ -464,7 +464,7 @@ Ask the user a concise question when you need confirmation, a choice, or missing
         "properties": {
           "id": {
             "type": "string",
-            "description": "Stable id for this question; echoed in the answer."
+            "description": "Optional stable id for this question (auto-filled q1, q2, … when omitted); echoed in the answer."
           },
           "question": {
             "type": "string",
@@ -501,7 +501,6 @@ Ask the user a concise question when you need confirmation, a choice, or missing
           }
         },
         "required": [
-          "id",
           "question"
         ]
       }
@@ -598,16 +597,12 @@ exit_plan_mode stays in the model-facing schema while planning is inactive so tr
 
 ### `bash`
 
-Execute a bash command (`bash -c`) and return its stdout/stderr. Each call runs in a fresh shell; pass `workdir` instead of using `cd`. Managed `$DSH_*` variables expose current harness environment facts. Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. Provide `description` before `command` in the arguments. Before any delete or move, verify that the resolved absolute target path is the intended one; never run it against a computed path you have not checked. An unset variable expands to an empty string, so guard variables in such paths with `${VAR:?}`. Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]`, a policy denial: do not retry another way.
+Execute a bash command (`bash -c`) and return its stdout/stderr. Each call runs in a fresh shell; pass `workdir` instead of using `cd`. Managed `$DSH_*` variables expose current harness environment facts. Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. Before any delete or move, verify that the resolved absolute target path is the intended one; never run it against a computed path you have not checked. An unset variable expands to an empty string, so guard variables in such paths with `${VAR:?}`. Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]`, a policy denial: do not retry another way.
 
 ```json
 {
   "type": "object",
   "properties": {
-    "description": {
-      "type": "string",
-      "description": "Clear, concise description of what this command does in active voice, 5-10 words (shown in the UI). Examples: \"ls\" → \"List files in current directory\"; \"git status\" → \"Show working tree status\"; \"npm install\" → \"Install package dependencies\"."
-    },
     "command": {
       "type": "string",
       "description": "The bash command to execute."
@@ -626,7 +621,6 @@ Execute a bash command (`bash -c`) and return its stdout/stderr. Each call runs 
     }
   },
   "required": [
-    "description",
     "command"
   ]
 }

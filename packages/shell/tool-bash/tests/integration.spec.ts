@@ -101,7 +101,6 @@ describe('bash tool through the agent loop', () => {
     const adapter = new MockAdapter([
       toolCallResponse('call-1', 'bash', {
         command: 'printf \'%s\\n%s\\n%s\\n%s\\n\' "$DSH_HOME" "$DSH_SHELL" "$DSH_SESSION_ID" "${DSH_STALE_PARENT-unset}"',
-        description: 'inspect session environment',
       }),
       textResponse('Session environment inspected.'),
     ])
@@ -122,7 +121,7 @@ describe('bash tool through the agent loop', () => {
 
   it('foreground: model calls bash, sees the result, replies', async () => {
     const adapter = new MockAdapter([
-      toolCallResponse('call-1', 'bash', { command: 'echo integration-ok', description: 'test command' }, 'Running it.'),
+      toolCallResponse('call-1', 'bash', { command: 'echo integration-ok' }, 'Running it.'),
       textResponse('The command printed integration-ok.'),
     ])
     const ctx = await harness(adapter)
@@ -152,7 +151,7 @@ describe('bash tool through the agent loop', () => {
 
   it('foreground: non-zero exit is reported in the result text, not as isError', async () => {
     const adapter = new MockAdapter([
-      toolCallResponse('call-1', 'bash', { command: 'exit 9', description: 'test command' }),
+      toolCallResponse('call-1', 'bash', { command: 'exit 9' }),
       textResponse('It failed with code 9.'),
     ])
     const ctx = await harness(adapter)
@@ -181,7 +180,6 @@ describe('bash tool through the agent loop', () => {
     const adapter = new MockAdapter([
       toolCallResponse('call-1', 'bash', {
         command: `while [ ! -f ${JSON.stringify(sentinel)} ]; do sleep 0.02; done; echo bg-ok`,
-        description: 'test command',
         run_in_background: true,
       }),
       textResponse('Started it in the background.'),

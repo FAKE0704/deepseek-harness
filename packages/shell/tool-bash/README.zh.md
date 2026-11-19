@@ -52,7 +52,7 @@ kind: "package-reference"
 
 ### 运行命令
 
-工具执行 `bash -c <command>` 并返回合并后的输出。命令每次调用都运行在全新 shell 中，因此状态从不保留——请传 `workdir` 而不是 `cd`。非零退出以 `[exit code: N]` 报告给 agent 解读，而不是作为工具错误抛出。主动语态的 `description`（5–10 个词）在 UI 中标注该调用；schema 将它列在 `command` 前并要求模型先输出它，但不强制 JSON 成员顺序。`timeoutMs` 覆盖执行器的默认值与上限。超出执行器流上限的输出会被截断为尾部，完整输出保存到 spill 文件并报告其路径。工具描述要求 agent 在任何删除或移动前校验解析后的绝对目标路径，并用 `${VAR:?}` 保护此类路径中的变量。
+工具执行 `bash -c <command>` 并返回合并后的输出。命令每次调用都运行在全新 shell 中，因此状态从不保留——请传 `workdir` 而不是 `cd`。非零退出以 `[exit code: N]` 报告给 agent 解读，而不是作为工具错误抛出。`timeoutMs` 覆盖执行器的默认值与上限。超出执行器流上限的输出会被截断为尾部，完整输出保存到 spill 文件并报告其路径。工具描述要求 agent 在任何删除或移动前校验解析后的绝对目标路径，并用 `${VAR:?}` 保护此类路径中的变量。
 
 <a id="running-long-commands-in-the-background"></a>
 ### 后台运行长时间命令
@@ -192,7 +192,7 @@ renderer 输出依数据而定的 stdout 尾部，再输出可选的 `[stderr]` 
 
 #### 模型看到什么
 
-验证与策略失败统一为 `Error: <message>`。本包的稳定消息包括 `invalid command: expected a non-empty string`、`invalid description: expected a non-empty string`、`invalid timeoutMs: expected a positive number, got <value>`、升权配对失败、`run_in_background is disabled for this deployment (enableRunInBackground: false)`、`background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs`、`sandbox_permissions is not available in this composition (no sandboxing executor to escalate)`、审批不可用／拒绝／取消变体，以及 `tool call aborted`。
+验证与策略失败统一为 `Error: <message>`。本包的稳定消息包括 `invalid command: expected a non-empty string`、`invalid timeoutMs: expected a positive number, got <value>`、升权配对失败、`run_in_background is disabled for this deployment (enableRunInBackground: false)`、`background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs`、`sandbox_permissions is not available in this composition (no sandboxing executor to escalate)`、审批不可用／拒绝／取消变体，以及 `tool call aborted`。
 
 #### Token 影响
 

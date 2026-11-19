@@ -61,7 +61,6 @@ export const Config: z<Config> = z.object({
 /** Parsed tool args; execute validates value constraints absent from ParameterSchemaSpec. */
 interface BashToolArgs {
   command: string
-  description: string
   timeoutMs?: number
   workdir?: string
   run_in_background?: boolean
@@ -73,9 +72,6 @@ interface BashToolArgs {
 function validateBashArgs(args: BashToolArgs, effectiveMode: SandboxMode | undefined): void {
   if (args.command.trim().length === 0) {
     throw new Error('invalid command: expected a non-empty string')
-  }
-  if (args.description.trim().length === 0) {
-    throw new Error('invalid description: expected a non-empty string')
   }
   if (args.timeoutMs !== undefined && (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0)) {
     throw new Error(`invalid timeoutMs: expected a positive number, got ${JSON.stringify(args.timeoutMs)}`)
@@ -92,7 +88,6 @@ function bashDescription(): string {
     + 'Each call runs in a fresh shell; pass `workdir` instead of using `cd`. '
     + `Managed \`$${DSH_ENV_PREFIX}*\` variables expose current harness environment facts. `
     + 'Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. '
-    + 'Provide `description` before `command` in the arguments. '
     + 'Before any delete or move, verify that the resolved absolute target path is the intended one; never run it against a computed path you have not checked. '
     + 'An unset variable expands to an empty string, so guard variables in such paths with `${VAR:?}`. '
     + 'Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]`, a policy denial: do not retry another way.'
@@ -101,9 +96,10 @@ function bashDescription(): string {
 /**
  * Present foreground calls as terminals and background starts as generic cards.
  * The command remains the title on both paths; foreground cwd is passed through
- * for the bridge to resolve, while background descriptions remain card content.
+ * for the bridge to resolve. Neither path carries a model-written summary: the
+ * command is the only label the tool shows.
  */
-type BashCallArgs = { command: string; description: string; workdir?: string; run_in_background?: boolean }
+type BashCallArgs = { command: string; workdir?: string; run_in_background?: boolean }
 
 function presentBashCall(args: BashCallArgs): GenericCallView | TerminalCallView {
   if (args.run_in_background === true) {
@@ -112,13 +108,11 @@ function presentBashCall(args: BashCallArgs): GenericCallView | TerminalCallView
       title: args.command,
       kind: 'execute',
       rawInput: args.command,
-      content: [{ type: 'text', text: args.description }],
     }
   }
   return {
     card: 'terminal',
     title: args.command,
-    description: args.description,
     ...args.workdir !== undefined ? { cwd: args.workdir } : {},
   }
 }
@@ -375,13 +369,6 @@ export function apply(ctx: Context, config: Config = {}): void {
       name: 'bash',
       description: bashDescription(),
       parameters: {
-        description: {
-          type: 'string',
-          required: true,
-          description: 'Clear, concise description of what this command does in active voice, '
-            + '5-10 words (shown in the UI). Examples: "ls" → "List files in current directory"; '
-            + '"git status" → "Show working tree status"; "npm install" → "Install package dependencies".',
-        },
         command: { type: 'string', required: true, description: 'The bash command to execute.' },
         timeoutMs: {
           type: 'number',
