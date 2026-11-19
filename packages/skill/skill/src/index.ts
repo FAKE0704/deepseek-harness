@@ -13,7 +13,7 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-llm'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
-import { NamedEntries, ScopedLayers, scopeChainOf, scopeOf } from '@deepseek-ai/dsh-scope'
+import { AnonymousEntries, NamedEntries, ScopedLayers, scopeChainOf, scopeOf } from '@deepseek-ai/dsh-scope'
 import type { ScopeKey, ScopeLayer } from '@deepseek-ai/dsh-scope'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
@@ -116,6 +116,20 @@ export interface SkillLookupOptions {
 export interface SkillViewOptions extends SkillLookupOptions {
   /** Viewing scope (the calling agent); omitted reads the global layer alone. */
   readonly scope?: ScopeKey | undefined
+}
+
+/**
+ * Per-scope filter over the discovered skill catalog.
+ *
+ * Restrictions intersect across the scope chain: any scope on it may mask a
+ * discovered name from both the catalog listing and body loads for everything
+ * nested inside it. Names that discovery does not currently produce are inert
+ * rather than errors — a caller may legitimately name a skill that only exists
+ * in another workspace.
+ */
+export interface SkillRestriction {
+  /** Skill names that stay visible; every other discovered name is removed. */
+  readonly allow: readonly string[]
 }
 
 /**
@@ -329,6 +343,8 @@ class SkillLayer implements ScopeLayer {
   readonly providers: NamedEntries<RegisteredProvider>
   /** Runtime skills registered through contexts carrying this scope. */
   readonly runtime = new Map<string, SkillDefinition>()
+  /** Catalog filters registered through contexts carrying this scope; they intersect. */
+  readonly restrictions = new AnonymousEntries<ReadonlySet<string>>()
 
   constructor(scope: ScopeKey | undefined) {
     this.providers = new NamedEntries(name => new Error(scope === undefined
@@ -338,7 +354,15 @@ class SkillLayer implements ScopeLayer {
 
   /** Whether every contribution table in this aggregate layer is empty. */
   isEmpty(): boolean {
-    return this.providers.isEmpty() && this.runtime.size === 0
+    return this.providers.isEmpty() && this.runtime.size === 0 && this.restrictions.isEmpty()
+  }
+
+  /** Whether every catalog filter in this layer admits a discovered skill name. */
+  admits(name: string): boolean {
+    for (const allow of this.restrictions.values()) {
+      if (!allow.has(name)) return false
+    }
+    return true
   }
 }
 
@@ -460,6 +484,40 @@ export class SkillRegistry extends Service {
   }
 
   /**
+   * Restrict the visible skill face for the calling agent scope. Both catalog
+   * listings and body loads resolve through the same filtered set, so a name
+   * this restriction masks is invisible to the model and its loader alike.
+   *
+   * Requires a scoped context (`agent.ctx`): a context-global restriction would
+   * mask every agent, which is a deployment-wide hiding decision that belongs
+   * in the skill roots themselves. Restrictions intersect along the scope
+   * chain, skills this scope registers itself stay visible, and names that
+   * discovery does not currently produce stay inert.
+   * @param filter - allowed skill names; an empty list hides every skill.
+   * @returns the exact disposer that lifts this restriction.
+   */
+  restrict(filter: SkillRestriction): () => void {
+    if (scopeOf(this.ctx) === undefined) {
+      throw new Error('skills.restrict() requires a scoped context (agent.ctx): a context-global restriction would mask every agent')
+    }
+    const allow = filter?.allow
+    if (!Array.isArray(allow)) {
+      throw new Error('skills.restrict() requires an `allow` array: a missing filter is almost always a materialized-empty-config bug')
+    }
+    for (const name of allow) {
+      if (typeof name !== 'string' || name === '') {
+        throw new TypeError('skills.restrict() allow entries must be non-empty strings')
+      }
+    }
+    const compiled = new Set(allow)
+    return this.layers.effect(
+      this.ctx,
+      layer => layer.restrictions.append(compiled),
+      { label: 'skills.restrict()' },
+    )
+  }
+
+  /**
    * List invocation-neutral skill summaries for a workspace. Consumers apply
    * model or user invocation policy at their operational boundary. Lookup
    * options and provider candidates are readonly same-process values borrowed
@@ -556,10 +614,23 @@ export class SkillRegistry extends Service {
     const layers = [this.layers.global, ...this.layers.chainLayers(options.scope)]
     const merged = new Map<string, IndexedCandidate>()
     let cacheable = true
+    let restricted = false
     for (const layer of layers) {
       const collected = await this.collectLayer(layer, options)
       if (!collected.cacheable) cacheable = false
+      if (!layer.restrictions.isEmpty()) restricted = true
       for (const entry of collected.entries) merged.set(entry.candidate.name, entry)
+    }
+    if (!restricted) return { entries: merged, cacheable }
+    // Restrictions intersect across the whole chain: any scope on it may mask
+    // a discovered name for everything nested inside it. The filter runs after
+    // the merge so it never resurrects a shadowed entry, and the scope's own
+    // registrations stay outside it — an agent-provisioned skill is not an
+    // inherited catalog row. (Same posture as `tools.restrict()`.)
+    const own = this.layers.peek(options.scope)
+    for (const [name, entry] of merged) {
+      if (entry.layer === own) continue
+      if (!layers.every(layer => layer.admits(name))) merged.delete(name)
     }
     return { entries: merged, cacheable }
   }

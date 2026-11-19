@@ -766,6 +766,41 @@ describe('dsh-tool-skill', () => {
     await scope.dispose()
   })
 
+  it('publishes only the names a scoped skill restriction admits, and refuses the rest on load', async () => {
+    const home = await tempDir('tool-restricted-names')
+    const ctx = await setup(home)
+    ctx.skills.register({ name: 'wanted-skill', description: 'Wanted', source: 'runtime', content: 'wanted body' })
+    ctx.skills.register({ name: 'other-skill', description: 'Other', source: 'runtime', content: 'other body' })
+    ctx.skills.register({ name: 'blog-writing', description: 'Unrelated', source: 'runtime', content: 'blog body' })
+    const session = Session.create(SessionId('restricted-names'))
+    const agent = sessionAgent(session)
+    openMessageTurn(session)
+    const { scope } = await mintAgentScope(ctx, agent)
+    const scopedSkills = scope.ctx.get('skills')
+    if (scopedSkills === undefined) throw new Error('skills service missing')
+    scopedSkills.restrict({ allow: ['wanted-skill'] })
+
+    await composePrefixForAgent(ctx, agent)
+    const catalog = catalogMessages(session)
+    expect(catalog).toHaveLength(1)
+    const text = JSON.stringify(catalog[0]?.data.content)
+    expect(text).toContain('wanted-skill')
+    expect(text).not.toContain('other-skill')
+    expect(text).not.toContain('blog-writing')
+
+    const loaded = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: ToolCallId('restricted-load'),
+      name: 'skill',
+      arguments: { name: 'other-skill' },
+      agent,
+    })
+    expect(loaded.isError).toBe(true)
+    // Other agents keep the unfiltered catalog.
+    expect(JSON.stringify(await composePrefix(ctx, '/workspace'))).toContain('blog-writing')
+    await scope.dispose()
+  })
+
   it('does not attach shipped catalog guidance to a scoped same-name tool shadow', async () => {
     const home = await tempDir('tool-shadowed-catalog')
     const ctx = await setup(home)
