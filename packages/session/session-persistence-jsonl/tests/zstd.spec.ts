@@ -797,6 +797,9 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
     const ctx = await mount(root)
     expect(await ctx.sessionPersistence.list()).toEqual([])
 
+    // A decodable frame that packs a record behind the header keeps its leading
+    // header observable for discovery; the invalid packed record still rejects
+    // the targeted read as corruption rather than a missing session.
     const twoLinesId = SessionId('two-lines')
     await mkdir(sessionDir(root, undefined, twoLinesId), { recursive: true })
     await writeFile(logPath(root, undefined, twoLinesId, 'zstd'), await compressZstdFrame([
@@ -804,9 +807,9 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
       JSON.stringify({ type: 'turn/start' }),
       '',
     ].join('\n')))
-    expect(await ctx.sessionPersistence.list()).toEqual([])
+    expect((await ctx.sessionPersistence.list()).map(item => item.header.id)).toEqual([twoLinesId])
     await expect(ctx.sessionPersistence.open(twoLinesId, 'read'))
-      .rejects.toThrow(/first frame is not exactly one header line/)
+      .rejects.toThrow(/stored log is corrupt/)
   })
 
   it('rejects missing, empty, and checksum-corrupt header frames on targeted reads', async () => {

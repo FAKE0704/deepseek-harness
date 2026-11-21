@@ -1011,7 +1011,7 @@ describe('JSONL immutable generation publication', () => {
     expect(await decodeZstdJsonl(tornRequest.currentPath)).toBe(line(header(SESSION_FORMAT_VERSION)) + line(event0) + line(event1))
   })
 
-  it('rejects header-less raw and Zstandard sources and a non-independent Zstandard header frame', async () => {
+  it('rejects header-less raw and Zstandard sources and tolerates a decodable out-of-band header frame', async () => {
     const root = await tempRoot()
     const rawRoot = join(root, 'raw')
     const emptyZstdRoot = join(root, 'empty-zstd')
@@ -1030,9 +1030,12 @@ describe('JSONL immutable generation publication', () => {
     await expect(ensureJsonlGenerationCurrent(emptyZstd)).rejects.toThrow(
       'empty or header-less Zstandard session log',
     )
-    await expect(ensureJsonlGenerationCurrent(joinedZstd)).rejects.toThrow(
-      'first frame is not exactly one header line',
-    )
+    // A decodable out-of-band frame that packs an event behind the header
+    // stays verifiable: the leading record is split off like every reader does,
+    // and the published current generation carries the migrated v4 header.
+    await ensureJsonlGenerationCurrent(joinedZstd)
+    expect(await decodeZstdJsonl(joinedZstd.currentPath))
+      .toBe(line(header(SESSION_FORMAT_VERSION)) + line(event0))
   })
 
   it('rejects a complete Zstandard frame whose final JSONL record is torn', async () => {

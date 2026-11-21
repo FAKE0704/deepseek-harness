@@ -36,7 +36,7 @@ import type {
 } from '@deepseek-ai/dsh-session-format'
 import { validateStoredEvents } from '@deepseek-ai/dsh-session-persistence'
 import type { JsonlCompression } from './format.ts'
-import { generationLogFilename, logSuffix, SessionLogScanner } from './format.ts'
+import { generationLogFilename, logSuffix, SessionLogScanner, splitZstdHeaderFrame } from './format.ts'
 import { publishNewFileWin32 } from './win32.ts'
 import {
   compressZstdFrame,
@@ -446,14 +446,17 @@ async function decodeStreamingMigration(
     const first = decoded.next()
     /* v8 ignore next -- a non-empty structural frame list yields once or throws. */
     if (first.done) throw new Error('empty or header-less Zstandard session log')
-    assertIndependentHeaderFrame(first.value)
+    // Same tolerance as every reader: split the leading header record off the
+    // first frame and feed any records packed behind it as migration rows.
+    const firstFrame = splitZstdHeaderFrame(first.value)
     const stream = await startMigrationStream(
-      first.value,
+      firstFrame.headerRecord,
       sourceVersion,
       format,
       validateHistoricalHeader,
     )
     signal?.throwIfAborted()
+    await consumeMigrationBytes(stream.parser, [firstFrame.extraRecords], signal)
     await consumeMigrationBytes(stream.parser, decoded, signal)
     stream.parser.assertCompleteFramesEndOnRecord()
     if (tornStart !== undefined) {
@@ -596,8 +599,12 @@ function decodeCurrentGeneration(
     const header = plaintext.next()
     /* v8 ignore next -- a non-empty structural frame list yields once or throws. */
     if (header.done) throw new Error('empty or header-less Zstandard session log')
-    assertIndependentHeaderFrame(header.value)
-    const scanner = new SessionLogScanner(header.value, 'strict')
+    // Verification splits the leading header record off the first frame exactly
+    // like every reader: a decodable out-of-band frame that packs further
+    // records stays verifiable instead of blocking its generation migration.
+    const firstFrame = splitZstdHeaderFrame(header.value)
+    const scanner = new SessionLogScanner(firstFrame.headerRecord, 'strict')
+    scanner.write(firstFrame.extraRecords)
     for (const chunk of plaintext) scanner.write(chunk)
     return finishCurrentGenerationScan(scanner)
   } finally {
@@ -623,12 +630,6 @@ function stringifyJson(value: unknown, subject: string): string {
   }
   if (typeof text !== 'string') throw new Error(`${subject} is not lossless JSON`)
   return text
-}
-
-function assertIndependentHeaderFrame(plaintext: Buffer): void {
-  if (plaintext.length === 0 || plaintext.indexOf(0x0A) !== plaintext.length - 1) {
-    throw new Error('corrupt Zstandard session log: first frame is not exactly one header line')
-  }
 }
 
 function assertGenerationPaths(

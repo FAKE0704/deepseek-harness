@@ -14,7 +14,7 @@ import {
   sessionFormatCatalog,
 } from '@deepseek-ai/dsh-session-format-catalog'
 import { readdirSync, type Dirent } from 'node:fs'
-import { open, mkdir, readdir, realpath, link, rm, stat, truncate } from 'node:fs/promises'
+import { open, mkdir, readdir, realpath, rename, link, rm, stat, truncate } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { scheduler } from 'node:timers/promises'
@@ -38,7 +38,7 @@ import { SESSION_FORMAT_VERSION, SessionId as makeSessionId, SessionLogOffset } 
 import type { SessionEvent, SessionId, SessionHeader, SessionLogOffset as SessionLogOffsetType } from '@deepseek-ai/dsh-session'
 import {
   assertNoRetiredHeaderFields, encodeSegment, eventLines, generationLogFilename, generationLogPath, logPath, logSuffix,
-  parseGenerationLogFilename, projectDir, scanLog, sessionDir, SessionLogScanner, toHeaderLine,
+  parseGenerationLogFilename, projectDir, scanLog, sessionDir, SessionLogScanner, splitZstdHeaderFrame, toHeaderLine,
   type JsonlCompression,
 } from './format.ts'
 import {
@@ -73,13 +73,6 @@ const DEFAULT_COMPRESSION: JsonlCompression = 'zstd'
  * remains an indivisible synchronous decode.
  */
 const ZSTD_DECODE_YIELD_INTERVAL_MS = 500
-
-/** Assert that the independently decodable first frame contains only the header record. */
-function assertZstdHeaderFrame(plaintext: Buffer): void {
-  if (plaintext.length === 0 || plaintext.indexOf(0x0A) !== plaintext.length - 1) {
-    throw new Error('corrupt Zstandard session log: first frame is not exactly one header line')
-  }
-}
 
 /** Loader schema for the JSONL artifact's physical encoding. */
 export const JsonlCompressionSchema: z<JsonlCompression> = z.union([
@@ -129,6 +122,9 @@ interface StoredLogBase extends FrozenStoredEvents {
   readonly recoveredTail: SessionEvent[]
   /** Exact fork-inherited prefix length stored in the header line. */
   readonly inheritedEventCount: SessionLogOffsetType
+  /** The first frame carried more than the header record (decodable out-of-band
+   *  writer); the write path's first mutation reframes the artifact canonically. */
+  readonly reframeCanonical: boolean
   readonly revision: PersistenceRevision
 }
 
@@ -441,6 +437,11 @@ class JsonlSessionPersistence extends SessionPersistence {
         tornTruncateTo: stored.tornTruncateTo,
         recoveredTail: stored.recoveredTail,
         inheritedEventCount: stored.inheritedEventCount,
+        // The read face accepted a decodable out-of-band first frame; the
+        // first mutation rewrites this exact artifact canonically.
+        ...(stored.reframeCanonical
+          ? { reframe: { events: stored.events, path: resolved.currentPath } }
+          : {}),
         primed: stored,
       }, lease))
     } catch (error) {
@@ -736,6 +737,7 @@ class JsonlSessionPersistence extends SessionPersistence {
       tornTruncateTo: undefined,
       recoveredTail: [],
       inheritedEventCount: SessionLogOffset(prepared.artifact.inheritedEventCount),
+      reframeCanonical: false,
       revision: fileRevision(prepared.sourceIdentity),
       publication: { source: selected, value: prepared },
     }
@@ -762,6 +764,7 @@ class JsonlSessionPersistence extends SessionPersistence {
       tornTruncateTo: stored.tornTruncateTo,
       recoveredTail: stored.recoveredTail,
       inheritedEventCount: stored.inheritedEventCount,
+      reframeCanonical: false,
       revision: fileRevision(identity),
     }
     this.memoizeStoredLog(id, published)
@@ -825,6 +828,7 @@ class JsonlSessionPersistence extends SessionPersistence {
       events: SessionEvent[]
       tornTruncateTo: number | undefined
       recoveredTail: SessionEvent[]
+      reframeCanonical: boolean
     }
     try {
       if (this.compression === 'zstd') {
@@ -841,6 +845,7 @@ class JsonlSessionPersistence extends SessionPersistence {
           // A torn raw tail is one incomplete JSONL line; it holds no complete
           // record to recover.
           recoveredTail: [],
+          reframeCanonical: false,
         }
       }
     } catch (error: unknown) {
@@ -948,6 +953,46 @@ class JsonlSessionPersistence extends SessionPersistence {
   }
 
   /**
+   * Rewrite one materialized log in the canonical frame layout — one
+   * independently decodable header frame, then one event-batch frame — without
+   * changing its logical content. Consumed on a write handle's first mutation
+   * after the reader accepted a decodable out-of-band first frame
+   * (`reframeCanonical`); the caller holds the write lease, so publishing via
+   * one atomic rename cannot interleave with another writer. The read face
+   * never calls this: opens stay fail-closed pure, repairs ride mutations.
+   * @param header - the session's stored header.
+   * @param path - the exact artifact the read face accepted (never re-derived
+   *   from the header, which may name a different project bucket).
+   * @param events - the validated stored prefix (including any recovered tail).
+   * @param inheritedEventCount - the exact fork-inherited prefix length.
+   */
+  async reframeCanonicalLog(
+    header: SessionHeader,
+    path: string,
+    events: readonly SessionEvent[],
+    inheritedEventCount: SessionLogOffsetType,
+  ): Promise<void> {
+    this.coldLogMemo.delete(header.id)
+    await this.ensureRootEncoding()
+    const content = await this.encodeMaterialization(header, inheritedEventCount, events)
+    const tmp = await this.writeSyncedTempFile(path, content)
+    try {
+      await rename(tmp, path)
+    } catch (error) {
+      /* v8 ignore start -- a rename failure is an unreachable filesystem IO edge: the temp file is dropped and the fault propagates */
+      await rm(tmp, { force: true })
+      throw error
+      /* v8 ignore stop */
+    }
+    // Windows publishes through write-through namespace operations; only POSIX needs the directory fsync.
+    /* v8 ignore next -- native Windows coverage exercises this platform dispatch; Linux covers the POSIX peer */
+    if (process.platform !== 'win32') await this.syncDirPosix(dirname(path))
+    this.ctx.logger.warn(
+      `${this.name}: session "${header.id}" reframed a non-canonical log into the canonical frame layout`,
+    )
+  }
+
+  /**
    * Whether this process still tracks a created-but-unmaterialized session.
    * @param id - the session to test.
    * @returns true while the pending entry exists.
@@ -1000,6 +1045,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     events: SessionEvent[]
     tornTruncateTo: number | undefined
     recoveredTail: SessionEvent[]
+    reframeCanonical: boolean
   }> {
     signal?.throwIfAborted()
     const { frames, tornStart } = scanZstdFrames(buffer)
@@ -1015,8 +1061,17 @@ class JsonlSessionPersistence extends SessionPersistence {
       signal?.throwIfAborted()
       /* v8 ignore next -- a non-empty structural frame list makes the decoder yield its first frame or throw. */
       if (headerFrame.done) throw new Error('empty or header-less Zstandard session log')
-      assertZstdHeaderFrame(headerFrame.value)
-      const scanner = new SessionLogScanner(headerFrame.value)
+      // Canonical logs keep exactly one header record in the independently
+      // decodable first frame (metadata readers decode exactly that frame).
+      // Out-of-band writers have produced decodable logs whose first frame
+      // carries more records; refusing those bricks the session's every
+      // future open, so the reader tolerates them when the leading record is
+      // a valid header and reports `reframeCanonical` for the write path to
+      // rewrite the artifact canonically on its first mutation.
+      const firstFrame = splitZstdHeaderFrame(headerFrame.value)
+      const scanner = new SessionLogScanner(firstFrame.headerRecord)
+      const reframeCanonical = firstFrame.extraRecords.length > 0
+      if (reframeCanonical) scanner.write(firstFrame.extraRecords)
 
       let remainingFrames = frames.length - 1
       for (const plaintext of decodedFrames) {
@@ -1042,6 +1097,7 @@ class JsonlSessionPersistence extends SessionPersistence {
           events: prefix.events,
           tornTruncateTo: undefined,
           recoveredTail: [],
+          reframeCanonical,
         }
       }
       // A torn final frame's append never resolved, but complete JSONL records
@@ -1066,6 +1122,7 @@ class JsonlSessionPersistence extends SessionPersistence {
         events: prefix.events,
         tornTruncateTo: tornStart,
         recoveredTail: prefix.events.slice(complete.eventCount),
+        reframeCanonical,
       }
     } catch (error) {
       /* v8 ignore next -- decoder failure plus concurrent abort is timing-dependent */
@@ -1495,7 +1552,13 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
   }
 
-  /** Read only the header frame; compression failures reject as corruption, while I/O and cancellation propagate. */
+  /**
+   * Read the leading header record; compression failures reject as corruption,
+   * while I/O and cancellation propagate. Decodable out-of-band first frames
+   * that carry more records are tolerated down to their leading record — the
+   * same tolerance the full decode applies — so discovery and stat stay
+   * accurate for artifacts awaiting their first canonical reframe.
+   */
   private async readFirstZstdLine(path: string, signal?: AbortSignal): Promise<string | undefined> {
     signal?.throwIfAborted()
     const handle = await open(path, 'r')
@@ -1516,8 +1579,8 @@ class JsonlSessionPersistence extends SessionPersistence {
           if (first === undefined) continue
           const plaintext = await decompressZstdFrame(content.subarray(first.start, first.end))
           signal?.throwIfAborted()
-          assertZstdHeaderFrame(plaintext)
-          return plaintext.subarray(0, -1).toString('utf8')
+          const { headerRecord } = splitZstdHeaderFrame(plaintext)
+          return headerRecord.subarray(0, -1).toString('utf8')
         } catch (error) {
           /* v8 ignore next -- decoder failure plus concurrent abort is timing-dependent */
           if (signal?.aborted) signal.throwIfAborted()
